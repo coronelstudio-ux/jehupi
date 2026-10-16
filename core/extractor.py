@@ -40,6 +40,12 @@ ESQUEMA = {
                     "razon_social_emisor": _CAMPO_TEXTO,
                     "ruc_receptor": _CAMPO_TEXTO,
                     "dv_receptor": _CAMPO_TEXTO,
+                    "tipo_doc_receptor": {
+                        "type": "string",
+                        "enum": ["RUC", "CEDULA", "PASAPORTE", "CEDULA_EXTRANJERA", "SIN_NOMBRE",
+                                 "DIPLOMATICO", "ID_TRIBUTARIA"],
+                    },
+                    "nombre_receptor": _CAMPO_TEXTO,
                     "timbrado": _CAMPO_TEXTO,
                     "vigencia_inicio": _CAMPO_TEXTO,
                     "vigencia_fin": _CAMPO_TEXTO,
@@ -58,7 +64,7 @@ ESQUEMA = {
                 },
                 "required": [
                     "clase", "tipo_documento", "cdc", "ruc_emisor", "dv_emisor", "razon_social_emisor",
-                    "ruc_receptor", "dv_receptor", "timbrado", "vigencia_inicio", "vigencia_fin", "numero",
+                    "ruc_receptor", "dv_receptor", "tipo_doc_receptor", "nombre_receptor", "timbrado", "vigencia_inicio", "vigencia_fin", "numero",
                     "fecha_emision", "condicion", "moneda", "gravada_10", "gravada_5", "exenta", "total",
                     "iva_10", "iva_5", "campos_dudosos", "observaciones",
                 ],
@@ -83,6 +89,8 @@ Cómo completar los campos:
 - Una página puede tener más de un comprobante: devolvé uno por cada comprobante que veas.
 - Si la página es la continuación de un comprobante de la página anterior (sin encabezado propio), usá contenido_pagina = CONTINUACION y comprobantes vacío. Si no es un comprobante (hoja en blanco, otro documento), usá NO_ES_COMPROBANTE.
 - RUC: solo los dígitos, sin puntos; el dígito verificador va aparte en dv_emisor / dv_receptor. El emisor es quien emite la factura (arriba, junto al timbrado). El receptor es el cliente ("Señor(es)", "RUC/CI").
+- tipo_doc_receptor: RUC si el documento del receptor tiene dígito verificador (ej. 80012345-6) o dice RUC; CEDULA si es un número de cédula sin DV; PASAPORTE, CEDULA_EXTRANJERA, DIPLOMATICO o ID_TRIBUTARIA si así lo indica; SIN_NOMBRE si no figura comprador, dice "sin nombre", "consumidor final" o "innominado", o es un ticket sin datos del comprador. Para CEDULA, ruc_receptor lleva solo los números (sin puntos) y dv_receptor queda vacío.
+- nombre_receptor: nombre o razón social del receptor tal como figura.
 - timbrado: los 8 dígitos. Vigencia y fecha de emisión en formato dd/mm/aaaa.
 - numero: en formato 001-001-0000000 (establecimiento-punto de expedición-número).
 - Montos en guaraníes, enteros, sin puntos ni decimales. gravada_10, gravada_5 y exenta son los subtotales de las columnas de venta, CON IVA incluido. total es el total a pagar. iva_10 e iva_5 son los de la liquidación del IVA. Si un monto no figura, poné 0.
@@ -94,6 +102,7 @@ Cómo completar los campos:
 
 VALORES_POR_DEFECTO = {
     "clase": "OTRO", "tipo_documento": "OTRO", "condicion": "NO_INDICA", "moneda": "PYG",
+    "tipo_doc_receptor": "SIN_NOMBRE",
     "gravada_10": 0, "gravada_5": 0, "exenta": 0, "total": 0, "iva_10": 0, "iva_5": 0,
     "campos_dudosos": [],
 }

@@ -7,10 +7,12 @@ from . import archivos, config, db
 from .extractor import extraer_pagina
 from .ingesta import paginas_desde_archivo
 from .qr import leer_qr
-from .validaciones import (formatear_fecha, normalizar_numero, normalizar_ruc, parsear_fecha, solo_digitos,
+from .validaciones import (NUMERO_SIN_NOMBRE, formatear_fecha, normalizar_numero, normalizar_ruc, parsear_fecha, solo_digitos,
                            validar_comprobante)
 
 TIPO_DOCUMENTO = {"FACTURA": 109, "TICKET": 112}
+TIPO_IDENTIFICACION = {"RUC": "11", "CEDULA": "12", "PASAPORTE": "13", "CEDULA_EXTRANJERA": "14",
+                       "SIN_NOMBRE": "15", "DIPLOMATICO": "16", "ID_TRIBUTARIA": "17"}
 CONDICION = {"CONTADO": 1, "CREDITO": 2}
 
 
@@ -62,19 +64,39 @@ def _registro_electronico(cdc: str, base: dict) -> dict:
     return asignar_periodo(registro)
 
 
+def comprador_de_venta(tipo_doc: str, numero: str, dv: str) -> tuple[str, str, str]:
+    """Ventas: (tipo_identificacion, numero, dv) del comprador, con las reglas de la oficina."""
+    tipo = TIPO_IDENTIFICACION.get(tipo_doc, "15")
+    if tipo == "11":
+        numero, dv = normalizar_ruc(numero, dv)  # si falta el DV, la validación lo marca para revisar
+    if tipo == "12":
+        numero, dv = solo_digitos(numero).lstrip("0"), ""
+    if tipo == "15" or not str(numero).strip():
+        return "15", NUMERO_SIN_NOMBRE, ""
+    if tipo not in ("11", "12"):
+        numero, dv = str(numero).strip(), ""
+    return tipo, numero, dv
+
+
 def _registro_desde_ia(item: dict, base: dict, cliente: dict) -> dict:
+    tipo_identificacion = "11"
+    razon_social = item["razon_social_emisor"]
     ruc, dv = normalizar_ruc(item["ruc_emisor"], item["dv_emisor"])
     ruc_receptor, _ = normalizar_ruc(item["ruc_receptor"], item["dv_receptor"])
-    if base["tipo_lote"] == "VENTAS":  # en ventas la contraparte es el receptor
-        ruc, dv = normalizar_ruc(item["ruc_receptor"], item["dv_receptor"])
+    if base["tipo_lote"] == "VENTAS":
+        # En ventas la contraparte es el comprador (receptor) y el emisor es el cliente del estudio.
+        tipo_identificacion, ruc, dv = comprador_de_venta(item["tipo_doc_receptor"], item["ruc_receptor"],
+                                                          item["dv_receptor"])
+        razon_social = item["nombre_receptor"]
         ruc_receptor, _ = normalizar_ruc(item["ruc_emisor"], item["dv_emisor"])
     registro = {
         **base,
         "clase": item["clase"],
         "tipo_comprobante": TIPO_DOCUMENTO.get(item["tipo_documento"]),
         "cdc": solo_digitos(item["cdc"]) or None,
+        "tipo_identificacion": tipo_identificacion,
         "ruc": ruc, "dv": dv,
-        "razon_social": item["razon_social_emisor"],
+        "razon_social": razon_social,
         "ruc_receptor": ruc_receptor,
         "timbrado": solo_digitos(item["timbrado"]),
         "vigencia_inicio": formatear_fecha(item["vigencia_inicio"]),
@@ -95,7 +117,7 @@ def evaluar(c: dict, cliente: dict) -> dict:
     """Corre las validaciones y define el estado (OK o REVISAR) de un comprobante no electrónico."""
     duplicado = db.es_duplicado(c["cliente_id"], c["tipo_lote"], c.get("ruc"), c.get("timbrado"),
                                 c.get("numero"), c.get("id") or 0)
-    c["errores"] = validar_comprobante(c, cliente["ruc"], c["periodo"], duplicado)
+    c["errores"] = validar_comprobante(c, cliente["ruc"], c["periodo"], duplicado, c["tipo_lote"])
     c["estado"] = "REVISAR" if c["errores"] else "OK"
     return c
 

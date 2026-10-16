@@ -13,7 +13,7 @@ from psycopg_pool import ConnectionPool
 from . import config
 
 CAMPOS_EDITABLES = [
-    "periodo", "clase", "tipo_comprobante", "cdc", "ruc", "dv", "razon_social", "ruc_receptor", "timbrado",
+    "periodo", "clase", "tipo_comprobante", "cdc", "tipo_identificacion", "ruc", "dv", "razon_social", "ruc_receptor", "timbrado",
     "vigencia_inicio", "vigencia_fin", "numero", "fecha", "gravada_10", "gravada_5", "exenta", "total",
     "iva_10", "iva_5", "condicion", "moneda", "imputa_iva", "imputa_ire", "imputa_irp", "estado",
     "errores", "campos_dudosos", "observaciones", "exportado",
@@ -54,6 +54,8 @@ atexit.register(cerrar)
 def _adaptar(params):
     """Los diccionarios van como JSON; las listas, como listas de PostgreSQL (para ANY(...)).
     Una lista que deba guardarse como JSON se pasa envuelta con json_()."""
+    if isinstance(params, dict):  # parámetros con nombre: %(nombre)s
+        return params
     return tuple(Jsonb(p) if isinstance(p, dict) else p for p in params)
 
 
@@ -152,12 +154,15 @@ def actualizar_comprobante(comprobante_id: int, cambios: dict, usuario: str, acc
 
 
 def es_duplicado(cliente_id: int, tipo_lote: str, ruc: str, timbrado: str, numero: str, excluir_id: int = 0) -> bool:
-    if not (ruc and timbrado and numero):
+    """Compras: mismo proveedor + timbrado + número. Ventas: mismo timbrado + número (son del propio cliente)."""
+    if not (timbrado and numero) or (tipo_lote == "COMPRAS" and not ruc):
         return False
+    filtro_ruc = "AND ruc=%(ruc)s" if tipo_lote == "COMPRAS" else ""
     return fila(
-        "SELECT 1 AS si FROM comprobantes WHERE cliente_id=%s AND tipo_lote=%s AND ruc=%s AND timbrado=%s "
-        "AND numero=%s AND id<>%s AND estado <> 'DESCARTADA'",
-        (cliente_id, tipo_lote, ruc, timbrado, numero, excluir_id),
+        f"SELECT 1 AS si FROM comprobantes WHERE cliente_id=%(cliente)s AND tipo_lote=%(tipo)s {filtro_ruc} "
+        "AND timbrado=%(timbrado)s AND numero=%(numero)s AND id<>%(excluir)s AND estado <> 'DESCARTADA'",
+        {"cliente": cliente_id, "tipo": tipo_lote, "ruc": ruc, "timbrado": timbrado, "numero": numero,
+         "excluir": excluir_id},
     ) is not None
 
 

@@ -5,6 +5,16 @@ from datetime import date, datetime
 TIPOS_SOPORTADOS = {109, 112}  # 109 factura, 112 ticket de máquina registradora
 TOLERANCIA_GS = 2  # diferencia de redondeo aceptada, en guaraníes
 
+# Ventas: tipos de identificación del comprador (Tabla 3 de la especificación de la DNIT).
+TIPOS_IDENTIFICACION = {
+    "11": "RUC", "12": "Cédula de identidad", "13": "Pasaporte", "14": "Cédula extranjera",
+    "15": "Sin nombre", "16": "Diplomático", "17": "Identificación tributaria",
+}
+# Con estos tipos la razón social va en blanco (Marangatu la completa o no la exige).
+IDENT_SIN_RAZON_SOCIAL = {"11", "12", "15"}
+# Número que usa la oficina para el comprador "sin nombre" (consumidor final).
+NUMERO_SIN_NOMBRE = "44444401"
+
 
 def calcular_dv(numero: str, base_max: int = 11) -> int:
     """Dígito verificador del RUC (algoritmo módulo 11 de la SET)."""
@@ -59,24 +69,54 @@ def formatear_fecha(texto) -> str:
     return f.strftime("%d/%m/%Y") if f else str(texto or "").strip()
 
 
-def validar_comprobante(c: dict, cliente_ruc: str, periodo: str, es_duplicado: bool = False) -> list[str]:
+def _validar_ruc(ruc: str, dv: str, quien: str) -> list[str]:
+    if not re.fullmatch(r"\d{1,8}", ruc):
+        return [f"RUC del {quien} ilegible o con formato inválido"]
+    if not dv:
+        return [f"Falta el DV del RUC del {quien} (el DV calculado sería {calcular_dv(ruc)})"]
+    if calcular_dv(ruc) != int(dv):
+        return [f"DV del RUC del {quien} incorrecto: dice {dv}, corresponde {calcular_dv(ruc)}"]
+    return []
+
+
+def _validar_comprador(c: dict) -> list[str]:
+    """Ventas: identificación del comprador según su tipo."""
+    tipo = str(c.get("tipo_identificacion") or "")
+    numero = str(c.get("ruc") or "")
+    if tipo not in TIPOS_IDENTIFICACION:
+        return ["Tipo de identificación del comprador inválido"]
+    if tipo == "11":
+        return _validar_ruc(numero, str(c.get("dv") or ""), "comprador")
+    if tipo == "12" and not re.fullmatch(r"\d{1,10}", numero):
+        return ["Cédula del comprador inválida (solo números, sin puntos)"]
+    if tipo == "15" and numero != NUMERO_SIN_NOMBRE:
+        return [f"Para comprador sin nombre el número debe ser {NUMERO_SIN_NOMBRE}"]
+    if not numero:
+        return ["Falta el número de documento del comprador"]
+    if tipo not in IDENT_SIN_RAZON_SOCIAL and not (c.get("razon_social") or "").strip():
+        return [f"Falta el nombre del comprador (obligatorio para {TIPOS_IDENTIFICACION[tipo].lower()})"]
+    return []
+
+
+def validar_comprobante(c: dict, cliente_ruc: str, periodo: str, es_duplicado: bool = False,
+                        tipo_lote: str = "COMPRAS") -> list[str]:
     """Devuelve la lista de problemas encontrados. Lista vacía = OK.
 
     `c` usa las mismas claves que la tabla `comprobantes`.
     `periodo` tiene el formato MM/AAAA.
+    En COMPRAS `ruc` es el proveedor y `ruc_receptor` el cliente del estudio;
+    en VENTAS `ruc` es el comprador y `ruc_receptor` el emisor (que debe ser el cliente del estudio).
     """
     errores: list[str] = []
+    ventas = tipo_lote == "VENTAS"
 
     if c.get("tipo_comprobante") not in TIPOS_SOPORTADOS:
         errores.append("Tipo de comprobante no soportado en esta fase (solo factura o ticket)")
 
-    ruc, dv = str(c.get("ruc") or ""), str(c.get("dv") or "")
-    if not re.fullmatch(r"\d{1,8}", ruc):
-        errores.append("RUC del proveedor ilegible o con formato inválido")
-    elif not dv:
-        errores.append(f"Falta el DV del RUC (el DV calculado sería {calcular_dv(ruc)})")
-    elif calcular_dv(ruc) != int(dv):
-        errores.append(f"DV del RUC incorrecto: dice {dv}, corresponde {calcular_dv(ruc)}")
+    if ventas:
+        errores += _validar_comprador(c)
+    else:
+        errores += _validar_ruc(str(c.get("ruc") or ""), str(c.get("dv") or ""), "proveedor")
 
     if not re.fullmatch(r"\d{8}", str(c.get("timbrado") or "")):
         errores.append("El timbrado debe tener 8 dígitos")
@@ -119,14 +159,20 @@ def validar_comprobante(c: dict, cliente_ruc: str, periodo: str, es_duplicado: b
         errores.append("Operación en moneda extranjera: no soportada en esta fase")
 
     receptor = str(c.get("ruc_receptor") or "")
-    if c.get("tipo_comprobante") == 109:
+    if ventas:
+        if not receptor:
+            errores.append("No se pudo leer el RUC del emisor de la factura")
+        elif receptor != cliente_ruc:
+            errores.append(f"La factura fue emitida por el RUC {receptor}, no por el cliente {cliente_ruc}")
+    elif c.get("tipo_comprobante") == 109:
         if not receptor:
             errores.append("La factura no muestra el RUC del cliente")
         elif receptor != cliente_ruc:
             errores.append(f"La factura está a nombre del RUC {receptor}, no del cliente {cliente_ruc}")
 
     if es_duplicado:
-        errores.append("Comprobante duplicado (mismo RUC, timbrado y número ya cargado)")
+        errores.append("Comprobante duplicado (mismo timbrado y número ya cargado)" if ventas
+                       else "Comprobante duplicado (mismo RUC, timbrado y número ya cargado)")
 
     dudosos = c.get("campos_dudosos") or []
     if dudosos:

@@ -70,6 +70,9 @@ create table if not exists comprobantes (
     observaciones text default '',
     actualizado_por text, actualizado_en timestamptz
 );
+-- Fase 2 (ventas): tipo de identificación de la contraparte (11 RUC, 12 cédula, 15 sin nombre…).
+alter table comprobantes add column if not exists tipo_identificacion text not null default '11';
+
 create index if not exists ix_comp_periodo on comprobantes(cliente_id, tipo_lote, periodo);
 create index if not exists ix_comp_clave on comprobantes(cliente_id, ruc, timbrado, numero);
 create index if not exists ix_comp_pagina on comprobantes(pagina_id);

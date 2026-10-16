@@ -1,6 +1,6 @@
 # Jehupi: facturas → Marangatu
 
-App web para la oficina contable que lee facturas de compra (PDF, fotos o escaneos), detecta si son electrónicas o de papel, extrae los datos con IA (**Gemini** o **Claude**), los valida y genera el archivo de importación del Registro de Comprobantes de Marangatu (RG 90/2021).
+App web para la oficina contable que lee facturas de **compras y ventas** (PDF, fotos o escaneos), detecta si son electrónicas o de papel, extrae los datos con IA (**Gemini** o **Claude**), los valida y genera el archivo de importación del Registro de Comprobantes de Marangatu (RG 90/2021).
 
 Funciona en servicios gratuitos y no necesita dominio propio:
 
@@ -13,7 +13,7 @@ Funciona en servicios gratuitos y no necesita dominio propio:
 
 ## Cómo funciona
 
-1. **Carga:** se elige el cliente y se suben los archivos. Cada factura se asigna sola al mes de su fecha de emisión.
+1. **Carga:** se elige el cliente, el registro (**COMPRAS** o **VENTAS**) y se suben los archivos. Cada factura se asigna sola al mes de su fecha de emisión.
 2. **Clasificación:**
    - KuDE en PDF digital → CDC leído del texto, **sin IA**.
    - Imagen con QR de e-Kuatia → CDC leído del QR, **sin IA**.
@@ -21,7 +21,23 @@ Funciona en servicios gratuitos y no necesita dominio propio:
 3. **Facturas electrónicas:** quedan como **EXCLUIDA**, porque ya figuran en Marangatu.
 4. **Validación:** DV del RUC, timbrado y vigencia, número, que 10% + 5% + exenta = total, IVA, RUC del cliente y duplicados. Si algo falla, la factura queda en **REVISAR**.
 5. **Revisión:** la imagen al lado de los datos, para corregir y aprobar o descartar. Cada cambio queda registrado con usuario y fecha.
-6. **Exportación:** genera `RUCsinDV_REG_MMAAAA_V0001.zip` (TXT tabulado, UTF-8, sin encabezados, 20 campos, razón social en blanco) y un Excel de control.
+6. **Exportación:** genera el ZIP de cada registro (TXT tabulado, UTF-8, sin encabezados) y un Excel de control:
+   - compras: `RUCsinDV_REG_MMAAAA_C0001.zip`, 20 campos;
+   - ventas: `RUCsinDV_REG_MMAAAA_V0001.zip`, 19 campos.
+
+### Compras y ventas
+
+| | Compras (20 campos) | Ventas (19 campos) |
+|---|---|---|
+| Tipo de registro | `2` | `1` |
+| Contraparte | Proveedor, siempre RUC (`11`) | Comprador: `11` RUC, `12` cédula (sin puntos), `13` pasaporte, `14` cédula extranjera, `15` sin nombre (`44444401`), `16` diplomático, `17` identificación tributaria |
+| Razón social (campo 4) | En blanco | En blanco para RUC, cédula y sin nombre; **obligatoria** para los demás |
+| Control del cliente | La factura debe estar **a nombre** del cliente | La factura debe estar **emitida por** el cliente |
+| Tickets (112) | Campos 9 a 11 en 0, solo el total | Con montos gravados y exentos |
+| Columna "no imputa" | Sí | No existe |
+| Duplicados | Mismo proveedor, timbrado y número | Mismo timbrado y número |
+
+Si la factura de venta no tiene datos del comprador (consumidor final), se registra como **sin nombre** (`15`, `44444401`).
 
 ### Imágenes temporales
 
@@ -41,6 +57,7 @@ Se conservan los **datos** de todas las facturas, no las imágenes.
    - región **South America (São Paulo)**;
    - anotar la **contraseña de la base**.
 2. En el proyecto: **SQL Editor** → **New query** → pegar todo el contenido de [`supabase/esquema.sql`](supabase/esquema.sql) → **Run**. Crea las tablas y la carpeta privada `facturas` para las imágenes.
+   - **Si ya lo había ejecutado antes de la versión con ventas, ejecútelo de nuevo**: agrega la columna nueva sin borrar datos.
 3. Copiar dos datos, que van en los secretos del paso 3:
    - **Connect** (arriba) → **Connection string** → **Session pooler** → URI. Esa es la `DATABASE_URL`: reemplazar `[YOUR-PASSWORD]` por la contraseña de la base.
    - **Project Settings → API**: la **Project URL** (`SUPABASE_URL`) y la clave **service_role** (`SUPABASE_SERVICE_KEY`).
@@ -117,7 +134,6 @@ tests/                  pruebas automáticas
 
 ## Pendiente
 
-- **Ventas** (Fase 2): falta el detalle de las diferencias del formato.
 - **Notas de crédito y débito**, autofacturas y moneda extranjera (Fase 3).
-- **Confirmar en Marangatu** el fin de línea del TXT (hoy CRLF) y los montos de los tickets (hoy, campos 9 a 11 en 0).
+- **Confirmar en Marangatu**: el fin de línea del TXT (hoy CRLF), los montos de los tickets de compras (hoy, campos 9 a 11 en 0) y que acepte la letra del identificador de archivo (`C` compras, `V` ventas).
 - **Respaldo automático** de Supabase (GitHub Actions → Google Drive).

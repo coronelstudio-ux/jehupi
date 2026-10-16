@@ -47,7 +47,7 @@ def test_comprobante_correcto():
 
 
 @pytest.mark.parametrize("cambio,texto", [
-    ({"dv": "3"}, "DV del RUC incorrecto"),
+    ({"dv": "3"}, "DV del RUC del proveedor incorrecto"),
     ({"timbrado": "1858618"}, "timbrado"),
     ({"total": 60000}, "no coincide con el total"),
     ({"iva_10": 5000}, "IVA 10%"),
@@ -143,9 +143,9 @@ def test_proceso_y_exportacion(base):
     van, no_van = exportar.exportables(comps)
     assert len(van) == 1
     (nombre, contenido, cantidad), = exportar.generar_zips(van, "5850580", "04/2026", 1)
-    assert nombre == "5850580_REG_042026_V0001.zip" and cantidad == 1
+    assert nombre == "5850580_REG_042026_C0001.zip" and cantidad == 1
     with zipfile.ZipFile(io.BytesIO(contenido)) as z:
-        assert z.namelist() == ["5850580_REG_042026_V0001.txt"]
+        assert z.namelist() == ["5850580_REG_042026_C0001.txt"]
         linea = z.read(z.namelist()[0]).decode("utf-8").rstrip("\r\n")
     assert linea.split("\t") == ["2", "11", "1895550", "", "109", "09/04/2026", "18586180", "001-001-0045645",
                                  "51000", "0", "0", "51000", "1", "N", "S", "N", "N", "N", "", ""]
@@ -158,7 +158,7 @@ def test_division_en_varios_archivos(monkeypatch):
          "gravada_10": 11, "gravada_5": 0, "exenta": 0, "total": 11, "condicion": 1, "imputa_iva": 1, "imputa_ire": 0,
          "imputa_irp": 0}
     zips = exportar.generar_zips([c] * 5, "80012345", "04/2026", 3)
-    assert [z[0] for z in zips] == [f"80012345_REG_042026_V000{i}.zip" for i in (3, 4, 5)]
+    assert [z[0] for z in zips] == [f"80012345_REG_042026_C000{i}.zip" for i in (3, 4, 5)]
     assert [z[2] for z in zips] == [2, 2, 1]
 
 
@@ -348,3 +348,108 @@ def test_pagina_con_dos_facturas_espera_a_ambas(base):
     assert archivos.liberar([pagina["id"]]) == 0      # falta la otra factura de la hoja
     db.actualizar_comprobante(b["id"], {"estado": "DESCARTADA"}, "test", "descartar")
     assert archivos.liberar([pagina["id"]]) == 1
+
+
+# ---------- Fase 2: ventas ----------
+
+from core.validaciones import NUMERO_SIN_NOMBRE  # noqa: E402
+
+
+@pytest.mark.parametrize("tipo_doc,numero,dv,esperado", [
+    ("RUC", "80012345", "0", ("11", "80012345", "0")),
+    ("RUC", "80.012.345-0", "", ("11", "80012345", "0")),
+    ("CEDULA", "1.234.567", "", ("12", "1234567", "")),
+    ("SIN_NOMBRE", "", "", ("15", NUMERO_SIN_NOMBRE, "")),
+    ("RUC", "", "", ("15", NUMERO_SIN_NOMBRE, "")),          # factura sin datos del comprador
+    ("PASAPORTE", "AB123456", "", ("13", "AB123456", "")),
+])
+def test_comprador_de_venta(tipo_doc, numero, dv, esperado):
+    assert procesador.comprador_de_venta(tipo_doc, numero, dv) == esperado
+
+
+def _venta(**cambios):
+    c = _comprobante(ruc="80012345", dv="0", tipo_identificacion="11", ruc_receptor="5850580",
+                     razon_social="Comprador SA")
+    c.update(cambios)
+    return c
+
+
+def test_venta_correcta():
+    assert validar_comprobante(_venta(), "5850580", "04/2026", tipo_lote="VENTAS") == []
+    assert validar_comprobante(_venta(tipo_identificacion="12", ruc="1234567", dv=""), "5850580", "04/2026",
+                               tipo_lote="VENTAS") == []
+    assert validar_comprobante(_venta(tipo_identificacion="15", ruc=NUMERO_SIN_NOMBRE, dv="", razon_social=""),
+                               "5850580", "04/2026", tipo_lote="VENTAS") == []
+
+
+@pytest.mark.parametrize("cambio,texto", [
+    ({"ruc_receptor": "1895550"}, "emitida por el RUC 1895550"),
+    ({"dv": "1"}, "DV del RUC del comprador incorrecto"),
+    ({"tipo_identificacion": "15", "ruc": "0", "dv": ""}, NUMERO_SIN_NOMBRE),
+    ({"tipo_identificacion": "12", "ruc": "1.234.567", "dv": ""}, "sin puntos"),
+    ({"tipo_identificacion": "13", "ruc": "AB1", "dv": "", "razon_social": ""}, "Falta el nombre del comprador"),
+    ({"tipo_identificacion": "99"}, "Tipo de identificación"),
+])
+def test_venta_con_errores(cambio, texto):
+    errores = validar_comprobante(_venta(**cambio), "5850580", "04/2026", tipo_lote="VENTAS")
+    assert any(texto in e for e in errores), errores
+
+
+def _fila_base(**cambios):
+    c = {"tipo_comprobante": 109, "tipo_identificacion": "11", "ruc": "80012345", "razon_social": "Comprador SA",
+         "fecha": "09/04/2026", "timbrado": "12345678", "numero": "001-001-0000010", "gravada_10": 11000,
+         "gravada_5": 2100, "exenta": 500, "total": 13600, "condicion": 2, "imputa_iva": 1, "imputa_ire": 0,
+         "imputa_irp": 0}
+    c.update(cambios)
+    return c
+
+
+def test_fila_venta_19_campos():
+    f = exportar.fila_venta(_fila_base())
+    assert len(f) == 19 and len(exportar.COLUMNAS_VENTAS) == 19
+    assert f == ["1", "11", "80012345", "", "109", "09/04/2026", "12345678", "001-001-0000010",
+                 "11000", "2100", "500", "13600", "2", "N", "S", "N", "N", "", ""]
+    # Pasaporte: la razón social sí va. Ticket: en ventas conserva los montos.
+    assert exportar.fila_venta(_fila_base(tipo_identificacion="13", ruc="AB123"))[3] == "Comprador SA"
+    ticket = exportar.fila_venta(_fila_base(tipo_comprobante=112, tipo_identificacion="15", ruc=NUMERO_SIN_NOMBRE))
+    assert ticket[1:4] == ["15", NUMERO_SIN_NOMBRE, ""] and ticket[8:12] == ["11000", "2100", "500", "13600"]
+    assert len(exportar.fila_compra(_fila_base())) == 20
+
+
+def test_lote_de_ventas_completo(base):
+    cliente_id, _ = _cliente_y_lote()
+    lote_id = db.ejecutar("INSERT INTO lotes (cliente_id, tipo, periodo, creado_por) "
+                          "VALUES (%s, 'VENTAS', '04/2026', 'test') RETURNING id", (cliente_id,))
+    emitida = dict(ruc_emisor="5850580", dv_emisor="6", razon_social_emisor="Cliente Prueba",
+                   timbrado="12345678", gravada_10=11000, total=11000, iva_10=1000)
+    respuestas = [
+        {"contenido_pagina": "COMPROBANTES", "comprobantes": [
+            _item(**emitida, numero="001-001-0000010", ruc_receptor="80012345", dv_receptor="0",
+                  tipo_doc_receptor="RUC", nombre_receptor="Comprador SA"),
+            _item(**emitida, numero="001-001-0000011", ruc_receptor="", dv_receptor="",
+                  tipo_doc_receptor="SIN_NOMBRE", nombre_receptor="")]},
+        {"contenido_pagina": "COMPROBANTES", "comprobantes": [
+            _item(**emitida, numero="001-001-0000012", ruc_receptor="3.456.789", dv_receptor="",
+                  tipo_doc_receptor="CEDULA", nombre_receptor="Juan Pérez")]},
+        {"contenido_pagina": "COMPROBANTES", "comprobantes": [   # factura de otro emisor: no es venta del cliente
+            _item(numero="001-001-0000099", tipo_doc_receptor="RUC", nombre_receptor="X")]},
+    ]
+    resumen = procesador.procesar_lote(lote_id, [("ventas.pdf", _pdf(["1", "2", "3"]))],
+                                       extractor=lambda *a: respuestas.pop(0))
+    assert resumen["OK"] == 3 and resumen["REVISAR"] == 1
+    malo = db.fila("SELECT * FROM comprobantes WHERE estado='REVISAR'")
+    assert any("emitida por el RUC" in e for e in malo["errores"])
+
+    comps = db.filas("SELECT * FROM comprobantes WHERE tipo_lote='VENTAS' ORDER BY id")
+    van, _ = exportar.exportables(comps)
+    (nombre, contenido, cantidad), = exportar.generar_zips(van, "5850580", "04/2026", 1, "VENTAS")
+    assert nombre == "5850580_REG_042026_V0001.zip" and cantidad == 3
+    with zipfile.ZipFile(io.BytesIO(contenido)) as z:
+        lineas = [l.split("\t") for l in z.read(z.namelist()[0]).decode().removesuffix("\r\n").split("\r\n")]
+    assert [l[:4] for l in lineas] == [["1", "11", "80012345", ""], ["1", "15", NUMERO_SIN_NOMBRE, ""],
+                                       ["1", "12", "3456789", ""]]
+    assert all(len(l) == 19 for l in lineas)
+
+    # En ventas, el duplicado es el mismo timbrado y número aunque cambie el comprador.
+    assert db.es_duplicado(cliente_id, "VENTAS", "999", "12345678", "001-001-0000010")
+    assert not db.es_duplicado(cliente_id, "COMPRAS", "999", "12345678", "001-001-0000010")

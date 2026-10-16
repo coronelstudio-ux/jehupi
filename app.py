@@ -9,7 +9,7 @@ import pandas as pd
 import streamlit as st
 
 from core import archivos, config, db, exportar, procesador
-from core.validaciones import calcular_dv, normalizar_numero, normalizar_ruc, solo_digitos
+from core.validaciones import TIPOS_IDENTIFICACION, calcular_dv, normalizar_numero, normalizar_ruc, solo_digitos
 
 st.set_page_config(page_title="Facturas → Marangatu", page_icon="🧾", layout="wide")
 try:
@@ -82,6 +82,10 @@ def elegir_periodo(clave: str) -> str:
     return f"{mes:02d}/{anio}"
 
 
+def elegir_tipo(clave: str) -> str:
+    return st.radio("Registro", ["COMPRAS", "VENTAS"], horizontal=True, key=clave)
+
+
 # ---------------------------------------------------------------- clientes
 
 def pagina_clientes() -> None:
@@ -140,10 +144,7 @@ def pagina_carga() -> None:
     st.caption("Cada factura se asigna sola al mes de su fecha de emisión. "
                "El mes elegido acá se usa solo si la fecha no se puede leer.")
     tipo = st.radio("Tipo de lote", ["COMPRAS", "VENTAS"], horizontal=True,
-                    captions=["", "Disponible en la Fase 2"])
-    if tipo == "VENTAS":
-        st.info("El registro de ventas se habilita en la Fase 2.")
-        return
+                    captions=["Facturas recibidas de proveedores", "Facturas emitidas por el cliente"])
     archivos = st.file_uploader("PDF (una o varias facturas por archivo), fotos o escaneos",
                                 type=["pdf", "jpg", "jpeg", "png", "tif", "tiff"], accept_multiple_files=True)
     if archivos and st.button("Procesar", type="primary"):
@@ -194,10 +195,21 @@ def formulario_comprobante(c: dict, cliente: dict) -> None:
             clase = f1.selectbox("Clase", CLASES, CLASES.index(c["clase"]) if c["clase"] in CLASES else 0)
             tipo = f2.selectbox("Tipo de comprobante", list(TIPOS), format_func=TIPOS.get,
                                 index=list(TIPOS).index(c["tipo_comprobante"]) if c["tipo_comprobante"] in TIPOS else 0)
+            ventas = c["tipo_lote"] == "VENTAS"
+            tipo_ident, razon_social = c.get("tipo_identificacion") or "11", c.get("razon_social") or ""
+            if ventas:
+                f1, f2 = st.columns([2, 3])
+                tipos = list(TIPOS_IDENTIFICACION)
+                tipo_ident = f1.selectbox("Documento del comprador", tipos,
+                                          index=tipos.index(tipo_ident) if tipo_ident in tipos else 0,
+                                          format_func=lambda t: f"{t} - {TIPOS_IDENTIFICACION[t]}")
+                razon_social = f2.text_input("Nombre del comprador", razon_social,
+                                             help="Obligatorio salvo RUC, cédula y sin nombre (44444401)")
             f1, f2, f3 = st.columns([3, 1, 2])
-            ruc = f1.text_input("RUC proveedor", c["ruc"] or "")
+            ruc = f1.text_input("RUC / CI / Nº del comprador" if ventas else "RUC proveedor", c["ruc"] or "",
+                                help="Cédula sin puntos; para sin nombre: 44444401" if ventas else None)
             dv = f2.text_input("DV", c["dv"] or "")
-            ruc_receptor = f3.text_input("RUC receptor", c["ruc_receptor"] or "")
+            ruc_receptor = f3.text_input("RUC emisor (cliente)" if ventas else "RUC receptor", c["ruc_receptor"] or "")
             f1, f2, f3 = st.columns(3)
             timbrado = f1.text_input("Timbrado", c["timbrado"] or "")
             numero = f2.text_input("Número", c["numero"] or "")
@@ -232,7 +244,10 @@ def formulario_comprobante(c: dict, cliente: dict) -> None:
         db.actualizar_comprobante(c["id"], {"estado": "DESCARTADA"}, usuario, "descartar")
         archivos.liberar([p["id"] for p in paginas])
         st.rerun()
-    ruc_n, dv_n = normalizar_ruc(ruc, dv)
+    if c["tipo_lote"] == "VENTAS" and tipo_ident != "11":
+        ruc_n, dv_n = (solo_digitos(ruc) if tipo_ident in ("12", "15") else ruc.strip()), ""
+    else:
+        ruc_n, dv_n = normalizar_ruc(ruc, dv)
     periodo = periodo.strip()
     if periodo == c["periodo"] and fecha.strip() != (c["fecha"] or ""):
         # Si se corrigió la fecha y no se tocó el período, el período sigue a la nueva fecha.
@@ -242,6 +257,7 @@ def formulario_comprobante(c: dict, cliente: dict) -> None:
         return
     nuevo = {
         **c, "periodo": periodo, "clase": clase, "tipo_comprobante": tipo, "ruc": ruc_n, "dv": dv_n,
+        "tipo_identificacion": tipo_ident, "razon_social": razon_social.strip(),
         "ruc_receptor": normalizar_ruc(ruc_receptor)[0], "timbrado": solo_digitos(timbrado),
         "numero": normalizar_numero(numero), "fecha": fecha.strip(), "vigencia_inicio": vig_ini.strip(),
         "vigencia_fin": vig_fin.strip(), "gravada_10": g10, "gravada_5": g5, "exenta": ex, "total": total,
@@ -266,14 +282,15 @@ def pagina_revision() -> None:
     if not cliente:
         return
     periodo = elegir_periodo("rev")
+    tipo_lote = elegir_tipo("rev_tipo")
     estados = st.multiselect("Estados", ESTADOS, default=["REVISAR"])
     if not estados:
         return
     marcas = ",".join("%s" for _ in estados)
     lista = db.filas(
         f"SELECT c.*, p.archivo, p.nro AS pagina FROM comprobantes c LEFT JOIN paginas p ON p.id=c.pagina_id "
-        f"WHERE c.cliente_id=%s AND c.tipo_lote='COMPRAS' AND c.periodo=%s AND c.estado IN ({marcas}) ORDER BY c.id",
-        (cliente["id"], periodo, *estados))
+        f"WHERE c.cliente_id=%s AND c.tipo_lote=%s AND c.periodo=%s AND c.estado IN ({marcas}) ORDER BY c.id",
+        (cliente["id"], tipo_lote, periodo, *estados))
     if not lista:
         st.success("No hay comprobantes con esos estados.")
         return
@@ -298,8 +315,9 @@ def pagina_exportar() -> None:
     if not cliente:
         return
     periodo = elegir_periodo("exp")
-    comprobantes = db.filas("SELECT * FROM comprobantes WHERE cliente_id=%s AND tipo_lote='COMPRAS' AND periodo=%s",
-                            (cliente["id"], periodo))
+    tipo_lote = elegir_tipo("exp_tipo")
+    comprobantes = db.filas("SELECT * FROM comprobantes WHERE cliente_id=%s AND tipo_lote=%s AND periodo=%s",
+                            (cliente["id"], tipo_lote, periodo))
     if not comprobantes:
         st.info("No hay comprobantes cargados para ese período.")
         return
@@ -315,13 +333,13 @@ def pagina_exportar() -> None:
 
     paginas = {p["id"]: f"{p['archivo']} p.{p['nro']}" for p in db.filas(
         "SELECT DISTINCT p.* FROM paginas p JOIN comprobantes c ON c.pagina_id=p.id "
-        "WHERE c.cliente_id=%s AND c.tipo_lote='COMPRAS' AND c.periodo=%s", (cliente["id"], periodo))}
-    st.download_button("Descargar Excel de control", exportar.generar_excel_control(van, no_van, paginas),
-                       file_name=f"control_{cliente['ruc']}_{periodo.replace('/', '')}.xlsx")
+        "WHERE c.cliente_id=%s AND c.tipo_lote=%s AND c.periodo=%s", (cliente["id"], tipo_lote, periodo))}
+    st.download_button("Descargar Excel de control", exportar.generar_excel_control(van, no_van, paginas, tipo_lote),
+                       file_name=f"control_{tipo_lote.lower()}_{cliente['ruc']}_{periodo.replace('/', '')}.xlsx")
 
     if van and st.button("Generar archivo para Marangatu", type="primary"):
-        secuencia = db.siguiente_secuencia(cliente["id"], "COMPRAS", periodo)
-        st.session_state.zips = exportar.generar_zips(van, cliente["ruc"], periodo, secuencia)
+        secuencia = db.siguiente_secuencia(cliente["id"], tipo_lote, periodo)
+        st.session_state.zips = exportar.generar_zips(van, cliente["ruc"], periodo, secuencia, tipo_lote)
         cerrados = van + [c for c in no_van if c["estado"] == "EXCLUIDA"]
         db.ejecutar("UPDATE comprobantes SET exportado = true WHERE id = ANY(%s)", ([c["id"] for c in cerrados],))
         liberadas = archivos.liberar(list({c["pagina_id"] for c in cerrados if c["pagina_id"]}))
@@ -329,16 +347,16 @@ def pagina_exportar() -> None:
             st.caption(f"Se borraron {liberadas} imágenes que ya no hacen falta.")
         for nombre, _, cantidad in st.session_state.zips:
             db.ejecutar("INSERT INTO exportaciones (cliente_id, tipo_lote, periodo, secuencia, archivo, cantidad, usuario) "
-                        "VALUES (%s,%s,%s,%s,%s,%s,%s)", (cliente["id"], "COMPRAS", periodo, secuencia, nombre, cantidad,
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s)", (cliente["id"], tipo_lote, periodo, secuencia, nombre, cantidad,
                                                           st.session_state.usuario["usuario"]))
             secuencia += 1
     for nombre, contenido, cantidad in st.session_state.get("zips", []):
-        if nombre.startswith(f"{cliente['ruc']}_REG_"):
+        if nombre.startswith(f"{cliente['ruc']}_REG_{periodo[:2]}{periodo[3:]}_{exportar.LETRA_LOTE[tipo_lote]}"):
             st.download_button(f"Descargar {nombre} ({cantidad} comprobantes)", contenido, file_name=nombre,
                                mime="application/zip", key=nombre)
 
-    historial = db.filas("SELECT archivo, cantidad, usuario, fecha FROM exportaciones WHERE cliente_id=%s AND periodo=%s "
-                         "ORDER BY id DESC", (cliente["id"], periodo))
+    historial = db.filas("SELECT tipo_lote AS registro, archivo, cantidad, usuario, fecha FROM exportaciones "
+                         "WHERE cliente_id=%s AND periodo=%s ORDER BY id DESC", (cliente["id"], periodo))
     if historial:
         st.caption("Archivos generados para este período")
         st.dataframe(pd.DataFrame(historial), hide_index=True, width="stretch")
