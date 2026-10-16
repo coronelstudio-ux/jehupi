@@ -1,0 +1,10 @@
+# Secretos: nunca al repositorio.
+.env
+.streamlit/secrets.toml
+
+# Datos locales de prueba.
+data/
+
+__pycache__/
+.pytest_cache/
+.venv/

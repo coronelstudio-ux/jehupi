@@ -1,0 +1,10 @@
+[client]
+# Oculta el menú de desarrollador.
+toolbarMode = "minimal"
+
+[server]
+# PDF grandes con muchas facturas (MB).
+maxUploadSize = 200
+
+[browser]
+gatherUsageStats = false
