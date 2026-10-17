@@ -8,7 +8,7 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-from core import archivos, config, db, exportar, procesador
+from core import archivos, config, contadis, db, exportar, procesador
 from core.validaciones import TIPOS_IDENTIFICACION, calcular_dv, normalizar_numero, normalizar_ruc, solo_digitos
 
 st.set_page_config(page_title="Facturas → Marangatu", page_icon="🧾", layout="wide")
@@ -218,6 +218,7 @@ def formulario_comprobante(c: dict, cliente: dict) -> None:
             vig_ini = f1.text_input("Vigencia desde", c["vigencia_inicio"] or "")
             vig_fin = f2.text_input("Vigencia hasta", c["vigencia_fin"] or "")
             periodo = f3.text_input("Período a declarar (MM/AAAA)", c["periodo"])
+            concepto = st.text_input("Concepto (para elegir la cuenta en Contadis)", c.get("concepto") or "")
             f1, f2, f3, f4 = st.columns(4)
             g10 = f1.number_input("Gravada 10%", 0, value=int(c["gravada_10"] or 0), step=1)
             g5 = f2.number_input("Gravada 5%", 0, value=int(c["gravada_5"] or 0), step=1)
@@ -257,7 +258,7 @@ def formulario_comprobante(c: dict, cliente: dict) -> None:
         return
     nuevo = {
         **c, "periodo": periodo, "clase": clase, "tipo_comprobante": tipo, "ruc": ruc_n, "dv": dv_n,
-        "tipo_identificacion": tipo_ident, "razon_social": razon_social.strip(),
+        "tipo_identificacion": tipo_ident, "razon_social": razon_social.strip(), "concepto": concepto.strip(),
         "ruc_receptor": normalizar_ruc(ruc_receptor)[0], "timbrado": solo_digitos(timbrado),
         "numero": normalizar_numero(numero), "fecha": fecha.strip(), "vigencia_inicio": vig_ini.strip(),
         "vigencia_fin": vig_fin.strip(), "gravada_10": g10, "gravada_5": g5, "exenta": ex, "total": total,
@@ -315,6 +316,22 @@ def pagina_exportar() -> None:
     if not cliente:
         return
     periodo = elegir_periodo("exp")
+
+    # Resumen para Contadis: compras y ventas del mes en un solo Excel, en el orden de carga de Contadis.
+    del_mes = db.filas("SELECT * FROM comprobantes WHERE cliente_id=%s AND periodo=%s", (cliente["id"], periodo))
+    if del_mes:
+        paginas_mes = {p["id"]: f"{p['archivo']} p.{p['nro']}" for p in db.filas(
+            "SELECT DISTINCT p.* FROM paginas p JOIN comprobantes c ON c.pagina_id=p.id "
+            "WHERE c.cliente_id=%s AND c.periodo=%s", (cliente["id"], periodo))}
+        st.download_button(
+            "📒 Descargar resumen para Contadis (compras y ventas)",
+            contadis.generar_resumen([c for c in del_mes if c["tipo_lote"] == "COMPRAS"],
+                                     [c for c in del_mes if c["tipo_lote"] == "VENTAS"],
+                                     cliente, periodo, paginas_mes),
+            file_name=f"contadis_{cliente['ruc']}_{periodo.replace('/', '')}.xlsx",
+            help="Columnas en el orden de la pantalla de Contadis; gravadas sin IVA y el IVA aparte.")
+        st.divider()
+
     tipo_lote = elegir_tipo("exp_tipo")
     comprobantes = db.filas("SELECT * FROM comprobantes WHERE cliente_id=%s AND tipo_lote=%s AND periodo=%s",
                             (cliente["id"], tipo_lote, periodo))

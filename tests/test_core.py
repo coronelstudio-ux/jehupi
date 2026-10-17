@@ -132,7 +132,7 @@ def test_proceso_y_exportacion(base):
     resumen = procesador.procesar_lote(lote_id, archivos, extractor=extractor_falso)
 
     assert resumen["paginas"] == 4
-    assert len(llamadas) == 3  # el KuDE digital no pasa por la IA
+    assert len(llamadas) == 4  # también el KuDE digital: la IA lee sus montos para Contadis
     comps = db.filas("SELECT * FROM comprobantes ORDER BY id")
     estados = [(c["clase"], c["estado"]) for c in comps]
     assert estados[0] == ("PREIMPRESA", "OK")
@@ -453,3 +453,108 @@ def test_lote_de_ventas_completo(base):
     # En ventas, el duplicado es el mismo timbrado y número aunque cambie el comprador.
     assert db.es_duplicado(cliente_id, "VENTAS", "999", "12345678", "001-001-0000010")
     assert not db.es_duplicado(cliente_id, "COMPRAS", "999", "12345678", "001-001-0000010")
+
+
+# ---------- resumen para Contadis ----------
+
+from core import contadis  # noqa: E402
+
+
+@pytest.mark.parametrize("con_iva,iva_impreso,divisor,esperado", [
+    (1_000_000, 90_909, 11, (909_091, 90_909)),      # captura de compras de Contadis
+    (1_100_000, 100_000, 11, (1_000_000, 100_000)),  # captura de ventas de Contadis
+    (51_000, 4_636, 11, (46_364, 4_636)),            # factura de Maxi Copias
+    (51_000, 0, 11, (46_364, 4_636)),                # sin IVA impreso: se calcula
+    (51_000, 9_999, 11, (46_364, 4_636)),            # IVA impreso incoherente: se usa el calculado
+    (21_000, 1_000, 21, (20_000, 1_000)),            # 5%
+])
+def test_separar_iva(con_iva, iva_impreso, divisor, esperado):
+    assert contadis.separar_iva(con_iva, iva_impreso, divisor) == esperado
+
+
+def _para_contadis(**cambios):
+    c = {"estado": "OK", "clase": "PREIMPRESA", "tipo_comprobante": 109, "numero": "001-001-0045645",
+         "fecha": "09/04/2026", "condicion": 1, "timbrado": "18586180", "ruc": "1895550", "dv": "9",
+         "razon_social": "Maxi Copias", "tipo_identificacion": "11", "gravada_10": 51000, "gravada_5": 0,
+         "exenta": 0, "total": 51000, "iva_10": 4636, "iva_5": 0, "concepto": "Útiles de librería",
+         "errores": [], "pagina_id": None}
+    c.update(cambios)
+    return c
+
+
+def test_fila_contadis_compras_y_ventas():
+    valores, avisos = contadis.fila(_para_contadis(), "COMPRAS")
+    assert dict(zip(contadis.COLUMNAS["COMPRAS"], valores)) | {"Fecha": None} == {
+        "Est.": "001", "Pto.": "001", "Número": "0045645", "Comprobante": "FACTURA", "Razón social": "Maxi Copias",
+        "Fecha": None, "Condición": "Contado", "Timbrado": "18586180", "RUC": "1895550-9",
+        "Gravadas 5%": 0, "Gravadas 10%": 46364, "I.V.A. 5%": 0, "I.V.A. 10%": 4636, "Exenta": 0, "Total": 51000,
+        "Concepto": "Útiles de librería", "Electrónica": "", "Cargado": "", "Observaciones": ""}
+    assert avisos == []
+    sin_nombre = dict(zip(contadis.COLUMNAS["VENTAS"], contadis.fila(
+        _para_contadis(tipo_identificacion="15", ruc=NUMERO_SIN_NOMBRE, dv="", razon_social=""), "VENTAS")[0]))
+    assert sin_nombre["Razón social"] == "CLIENTE OCASIONAL" and sin_nombre["RUC / CI"] == NUMERO_SIN_NOMBRE
+    cedula = dict(zip(contadis.COLUMNAS["VENTAS"], contadis.fila(
+        _para_contadis(tipo_identificacion="12", ruc="3456789", dv="", razon_social="Juan Pérez"), "VENTAS")[0]))
+    assert cedula["RUC / CI"] == "3456789"
+
+
+def test_resumen_contadis_excel():
+    from openpyxl import load_workbook
+    compras = [_para_contadis(numero="001-001-0000002", fecha="20/04/2026"),
+               _para_contadis(numero="001-001-0000001", fecha="05/04/2026", clase="ELECTRONICA", estado="EXCLUIDA"),
+               _para_contadis(numero="001-001-0000003", estado="REVISAR", errores=["DV incorrecto"]),
+               _para_contadis(numero="001-001-0000004", estado="DESCARTADA"),
+               _para_contadis(numero="001-001-0000005", clase="ELECTRONICA", estado="EXCLUIDA", total=0,
+                              gravada_10=0, iva_10=0)]
+    ventas = [_para_contadis(tipo_identificacion="15", ruc=NUMERO_SIN_NOMBRE, dv="", razon_social="")]
+    datos = contadis.generar_resumen(compras, ventas, {"nombre": "Cliente", "ruc": "5850580", "dv": "6"}, "04/2026")
+    wb = load_workbook(io.BytesIO(datos))
+    assert wb.sheetnames == ["Resumen", "Compras", "Ventas", "Pendientes"]
+    ws = wb["Compras"]
+    assert [ws.cell(r, 3).value for r in (2, 3)] == ["0000001", "0000002"]   # ordenadas por fecha
+    assert ws.cell(2, 17).value == "Sí"                                       # electrónica incluida
+    assert ws.cell(5, 1).value == "TOTALES" and ws.cell(5, 15).value == "=SUM(O2:O3)"
+    pendientes = [(r[0].value, r[2].value) for r in wb["Pendientes"].iter_rows(min_row=2)]
+    assert pendientes == [("COMPRAS", "001-001-0000003"), ("COMPRAS", "001-001-0000005")]
+    assert wb["Ventas"].cell(2, 5).value == "CLIENTE OCASIONAL"
+    resumen = [[c.value for c in fila] for fila in wb["Resumen"].iter_rows(min_row=6, max_row=7)]
+    assert resumen[0][:3] == ["Compras", 2, 2] and resumen[0][-1] == 102000
+    assert resumen[1][:3] == ["Ventas", 1, 0]
+
+
+def test_electronica_guarda_montos_para_contadis(base):
+    cliente_id, lote_id = _cliente_y_lote()
+    kude = "KuDE CDC " + " ".join(CDC[i:i + 4] for i in range(0, 44, 4))
+    respuestas = [
+        {"contenido_pagina": "COMPROBANTES", "comprobantes": [
+            _item(clase="ELECTRONICA", cdc="", ruc_emisor="80012345", dv_emisor="0", fecha_emision="15/09/2026",
+                  numero="001-002-0000123", gravada_10=110000, total=110000, iva_10=10000, concepto="Combustible")]},
+    ]
+
+    def extractor(imagen, ruc, nombre, tipo, cdcs):
+        assert cdcs == [CDC]  # la IA recibe el CDC leído del texto
+        return respuestas.pop(0)
+
+    procesador.procesar_lote(lote_id, [("kude.pdf", _pdf([kude]))], extractor=extractor)
+    c = db.fila("SELECT * FROM comprobantes")
+    assert (c["clase"], c["estado"], c["cdc"]) == ("ELECTRONICA", "EXCLUIDA", CDC)
+    assert (c["total"], c["iva_10"], c["concepto"]) == (110000, 10000, "Combustible")
+    assert (c["ruc"], c["numero"], c["fecha"], c["periodo"]) == ("80012345", "001-002-0000123", "15/09/2026", "09/2026")
+    cargar, pendientes = contadis.separar([c])
+    assert len(cargar) == 1 and not pendientes
+
+
+
+def test_electronica_sin_montos_si_falla_la_ia(base):
+    cliente_id, lote_id = _cliente_y_lote()
+    kude = "KuDE CDC " + " ".join(CDC[i:i + 4] for i in range(0, 44, 4))
+
+    def falla(*a):
+        raise RuntimeError("sin conexión")
+
+    procesador.procesar_lote(lote_id, [("kude.pdf", _pdf([kude]))], extractor=falla)
+    c = db.fila("SELECT * FROM comprobantes")
+    assert (c["clase"], c["estado"], c["total"]) == ("ELECTRONICA", "EXCLUIDA", 0)
+    assert "Sin montos" in c["observaciones"]
+    cargar, pendientes = contadis.separar([c])
+    assert not cargar and len(pendientes) == 1

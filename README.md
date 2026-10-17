@@ -39,6 +39,18 @@ Funciona en servicios gratuitos y no necesita dominio propio:
 
 Si la factura de venta no tiene datos del comprador (consumidor final), se registra como **sin nombre** (`15`, `44444401`).
 
+### Resumen para Contadis
+
+Mientras las facturas se sigan cargando en **Contadis** (que no tiene importación), la pantalla **Exportar** genera un Excel por cliente y mes para cargarlas lo más rápido posible:
+
+- **Hojas Compras y Ventas** con las columnas **en el orden de la pantalla de Contadis**: Factura (Est. / Pto. / Número), Comprobante, Razón social, Fecha, Condición, Timbrado y RUC, y después Gravadas 5%, Gravadas 10%, I.V.A. 5%, I.V.A. 10%, Exenta y Total.
+- **Gravadas sin IVA y el IVA aparte**, como pide Contadis (1.000.000 con IVA → 909.091 + 90.909).
+- **Incluye las facturas electrónicas** (columna "Electrónica"): no van a Marangatu, pero sí a la contabilidad. Para eso la IA lee también sus montos.
+- Consumidor final como **"CLIENTE OCASIONAL"**; RUC con guion (`1895550-9`).
+- **Concepto** de lo comprado o vendido, para elegir la cuenta.
+- Columna **Cargado** (Sí/No): la fila se pinta de verde al marcarla. **Totales** al pie para comparar con Contadis.
+- Hoja **Pendientes** con lo que todavía no está revisado, para no cargar datos sin control.
+
 ### Imágenes temporales
 
 Para no llenar el 1 GB gratuito, las imágenes **se borran solas** cuando ya no hacen falta:

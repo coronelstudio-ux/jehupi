@@ -18,23 +18,21 @@ CONDICION = {"CONTADO": 1, "CREDITO": 2}
 
 def analizar_pagina(pagina: dict, cliente: dict, tipo_lote: str, extractor: Callable = extraer_pagina) -> dict:
     """Devuelve {"comprobantes": [...], "contenido_pagina": ..., "cdcs": [...], "fuente": ...}."""
-    # 1) PDF digital (KuDE descargado): el CDC está en el texto, no hace falta IA.
-    cdcs_texto = cdc_mod.buscar_en_texto(pagina.get("texto", ""))
-    if cdcs_texto:
-        return {"contenido_pagina": "COMPROBANTES", "comprobantes": [], "cdcs": cdcs_texto, "fuente": "texto"}
+    # 1) El CDC de las electrónicas se toma sin IA: del texto (KuDE en PDF digital) o del QR.
+    cdcs = cdc_mod.buscar_en_texto(pagina.get("texto", "")) or \
+        [c for c in (cdc_mod.desde_qr(t) for t in leer_qr(pagina["jpg"])) if c]
 
-    # 2) Imagen o escaneo: intentar leer el QR.
-    cdcs_qr = [c for c in (cdc_mod.desde_qr(t) for t in leer_qr(pagina["jpg"])) if c]
-
-    # 3) Claude transcribe la página (también si hay QR, por si la hoja tiene otras facturas).
+    # 2) La IA lee la página siempre: también los montos de las electrónicas, que no se
+    #    importan a Marangatu pero sí se cargan en el sistema contable (Contadis).
     try:
-        resultado = extractor(pagina["jpg"], cliente["ruc"], cliente["nombre"], tipo_lote, cdcs_qr)
+        resultado = extractor(pagina["jpg"], cliente["ruc"], cliente["nombre"], tipo_lote, cdcs)
     except Exception as e:  # noqa: BLE001 - se registra el error y la página queda para revisión
-        if cdcs_qr:
-            return {"contenido_pagina": "COMPROBANTES", "comprobantes": [], "cdcs": cdcs_qr, "fuente": "qr"}
+        if cdcs:  # al menos se registran las electrónicas por su CDC (sin montos)
+            return {"contenido_pagina": "COMPROBANTES", "comprobantes": [], "cdcs": cdcs, "fuente": "cdc",
+                    "aviso": str(e)}
         return {"error": str(e), "comprobantes": [], "cdcs": []}
-    resultado["cdcs"] = cdcs_qr
-    resultado["fuente"] = "claude"
+    resultado["cdcs"] = cdcs
+    resultado["fuente"] = "ia"
     return resultado
 
 
@@ -54,13 +52,27 @@ def asignar_periodo(c: dict) -> dict:
     return c
 
 
-def _registro_electronico(cdc: str, base: dict) -> dict:
+def _registro_electronico(cdc: str, base: dict, item: dict | None = None, cliente: dict | None = None) -> dict:
+    """Factura electrónica: no va a Marangatu (ya figura), pero se guardan sus datos para el sistema contable.
+
+    Número, fecha y RUC del emisor salen del CDC (son exactos); montos, timbrado y comprador, de la IA.
+    """
     datos = cdc_mod.parsear(cdc)
-    registro = {
-        **base, "clase": "ELECTRONICA", "cdc": cdc, "ruc": datos["ruc"], "dv": datos["dv"],
-        "numero": datos["numero"], "fecha": datos["fecha"], "estado": "EXCLUIDA",
-        "observaciones": f"{datos['tipo_de']}: ya figura en Marangatu, no se importa.",
-    }
+    nota = f"{datos['tipo_de']}: ya figura en Marangatu, no se importa."
+    if item is None:
+        registro = {**base, "ruc": datos["ruc"], "dv": datos["dv"], "observaciones": nota + " Sin montos: completar."}
+        if base["tipo_lote"] == "VENTAS":
+            registro.update(ruc="", dv="", ruc_receptor=datos["ruc"])
+    else:
+        registro = _registro_desde_ia(item, base, cliente)
+        # La nota de período se recalcula abajo con la fecha del CDC.
+        registro["observaciones"] = " ".join(x for x in (nota, item.get("observaciones")) if x)
+        if base["tipo_lote"] == "VENTAS":
+            registro["ruc_receptor"] = datos["ruc"]
+        else:
+            registro.update(ruc=datos["ruc"], dv=datos["dv"])
+    registro.update(clase="ELECTRONICA", cdc=cdc, numero=datos["numero"], fecha=datos["fecha"],
+                    estado="EXCLUIDA", periodo=base["periodo"])
     return asignar_periodo(registro)
 
 
@@ -107,6 +119,7 @@ def _registro_desde_ia(item: dict, base: dict, cliente: dict) -> dict:
         "total": item["total"], "iva_10": item["iva_10"], "iva_5": item["iva_5"],
         "condicion": CONDICION.get(item["condicion"]),
         "moneda": (item["moneda"] or "PYG").upper(),
+        "concepto": (item.get("concepto") or "")[:120],
         "campos_dudosos": item["campos_dudosos"],
         "observaciones": item["observaciones"],
     }
@@ -190,7 +203,7 @@ def procesar_lote(lote_id: int, archivos_subidos: list[tuple[str, bytes]], extra
                 if cdc in cdcs_pendientes:
                     cdcs_pendientes.remove(cdc)
                 if cdc_mod.dv_valido(cdc):
-                    registros.append(_registro_electronico(cdc, base))
+                    registros.append(_registro_electronico(cdc, base, item, cliente))
                 else:
                     reg = _registro_desde_ia(item, base, cliente)
                     reg.update(estado="REVISAR", errores=["Parece electrónica pero el CDC no es válido: verificar"])
