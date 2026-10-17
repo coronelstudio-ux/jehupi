@@ -14,6 +14,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
+from .cuentas import descripcion_contadis, etiqueta
 from .validaciones import NUMERO_SIN_NOMBRE, TOLERANCIA_GS, parsear_fecha
 
 NOMBRE_SIN_NOMBRE = "CLIENTE OCASIONAL"  # como aparece en Contadis para el consumidor final
@@ -22,11 +23,14 @@ CONDICION = {1: "Contado", 2: "Crédito"}
 ESTADOS_INCLUIDOS = ("OK", "APROBADA", "EXCLUIDA")
 
 MONTOS = ["Gravadas 5%", "Gravadas 10%", "I.V.A. 5%", "I.V.A. 10%", "Exenta", "Total"]
+# Mismo orden que la pantalla "Entrada de datos" de Contadis; después, el panel de montos.
 COLUMNAS = {
-    "COMPRAS": ["Est.", "Pto.", "Número", "Comprobante", "Razón social", "Fecha", "Condición", "Timbrado",
-                "RUC", *MONTOS, "Concepto", "Electrónica", "Cargado", "Observaciones"],
+    "COMPRAS": ["Est.", "Pto.", "Número", "Comprobante", "Razón social", "Fecha", "Condición", "Cuenta",
+                "Descripción", "Timbrado", "RUC", *MONTOS, "Concepto", "Detalle", "Electrónica", "Cargado",
+                "Observaciones"],
     "VENTAS": ["Est.", "Pto.", "Número", "Comprobante", "Razón social", "RUC / CI", "Fecha", "Condición",
-               "Timbrado", *MONTOS, "Concepto", "Electrónica", "Cargado", "Observaciones"],
+               "Cuenta", "Descripción", "Timbrado", *MONTOS, "Concepto", "Detalle", "Electrónica", "Cargado",
+               "Observaciones"],
 }
 
 AZUL, VERDE, AMARILLO = "1F4E78", "C6EFCE", "FFF2CC"
@@ -62,8 +66,9 @@ def _razon_social(c: dict, tipo_lote: str) -> str:
     return (c.get("razon_social") or "").strip()
 
 
-def fila(c: dict, tipo_lote: str, origen: str = "") -> tuple[list, list[str]]:
+def fila(c: dict, tipo_lote: str, origen: str = "", cuentas_por_id: dict | None = None) -> tuple[list, list[str]]:
     """(valores en el orden de Contadis, avisos para la columna Observaciones)."""
+    cuenta = (cuentas_por_id or {}).get(c.get("cuenta_id"))
     base5, iva5 = separar_iva(c.get("gravada_5"), c.get("iva_5"), 21)
     base10, iva10 = separar_iva(c.get("gravada_10"), c.get("iva_10"), 11)
     exenta = int(c.get("exenta") or 0)
@@ -76,17 +81,22 @@ def fila(c: dict, tipo_lote: str, origen: str = "") -> tuple[list, list[str]]:
     razon = _razon_social(c, tipo_lote)
     if not razon:
         avisos.append("Falta razón social")
+    if not cuenta:
+        avisos.append("Sin cuenta")
+    elif c.get("cuenta_origen") == "IA" and c["estado"] != "APROBADA":  # aprobada = confirmada por una persona
+        avisos.append("Cuenta sugerida por la IA")
     est, pto, nro = _partes_numero(c.get("numero"))
     fecha = parsear_fecha(c.get("fecha"))
     cabecera = [est, pto, nro, COMPROBANTE.get(c.get("tipo_comprobante"), str(c.get("tipo_comprobante") or ""))]
     contraparte = [razon]
     if tipo_lote == "VENTAS":
         contraparte.append(_documento(c, tipo_lote))
-    datos = [fecha, CONDICION.get(c.get("condicion"), ""), str(c.get("timbrado") or "")]
+    datos = [fecha, CONDICION.get(c.get("condicion"), ""), etiqueta(cuenta),
+             descripcion_contadis(c, cuenta, razon) if cuenta else "", str(c.get("timbrado") or "")]
     if tipo_lote == "COMPRAS":
         datos.append(_documento(c, tipo_lote))
     montos = [base5, base10, iva5, iva10, exenta, total]
-    resto = [c.get("concepto") or "", "Sí" if c.get("clase") == "ELECTRONICA" else "", "",
+    resto = [c.get("concepto") or "", c.get("detalle") or "", "Sí" if c.get("clase") == "ELECTRONICA" else "", "",
              "; ".join(avisos + ([origen] if origen else []))]
     return cabecera + contraparte + datos + montos + resto, avisos
 
@@ -118,12 +128,13 @@ def _encabezado(ws, columnas: list[str]) -> None:
     ws.freeze_panes = "A2"
 
 
-def _hoja_registro(wb: Workbook, tipo_lote: str, comprobantes: list[dict], paginas: dict) -> dict:
+def _hoja_registro(wb: Workbook, tipo_lote: str, comprobantes: list[dict], paginas: dict,
+                   cuentas_por_id: dict | None = None) -> dict:
     ws = wb.create_sheet(tipo_lote.capitalize())
     columnas = COLUMNAS[tipo_lote]
     _encabezado(ws, columnas)
     for c in comprobantes:
-        valores, _ = fila(c, tipo_lote, paginas.get(c.get("pagina_id"), ""))
+        valores, _ = fila(c, tipo_lote, paginas.get(c.get("pagina_id"), ""), cuentas_por_id)
         ws.append(valores)
     n = len(comprobantes)
     col = {nombre: get_column_letter(i) for i, nombre in enumerate(columnas, start=1)}
@@ -167,15 +178,15 @@ def _hoja_registro(wb: Workbook, tipo_lote: str, comprobantes: list[dict], pagin
         ws.auto_filter.ref = f"A1:{ultima}{n + 1}"
 
     anchos = {"Est.": 6, "Pto.": 6, "Número": 10, "Comprobante": 13, "Razón social": 34, "Fecha": 11,
-              "Condición": 10, "Timbrado": 11, "RUC": 13, "RUC / CI": 13, "Concepto": 28, "Electrónica": 11,
-              "Cargado": 9, "Observaciones": 40}
+              "Condición": 10, "Cuenta": 34, "Descripción": 50, "Timbrado": 11, "RUC": 13, "RUC / CI": 13,
+              "Concepto": 28, "Detalle": 45, "Electrónica": 11, "Cargado": 9, "Observaciones": 40}
     for nombre, letra in col.items():
         ws.column_dimensions[letra].width = anchos.get(nombre, 13)
     return {"cantidad": n, **totales}
 
 
 def generar_resumen(compras: list[dict], ventas: list[dict], cliente: dict, periodo: str,
-                    paginas: dict[int, str] | None = None) -> bytes:
+                    paginas: dict[int, str] | None = None, cuentas_por_id: dict | None = None) -> bytes:
     """Excel con hojas Compras, Ventas, Pendientes y Resumen, listo para cargar en Contadis."""
     paginas = paginas or {}
     wb = Workbook()
@@ -183,8 +194,8 @@ def generar_resumen(compras: list[dict], ventas: list[dict], cliente: dict, peri
     compras_ok, compras_pend = separar(compras)
     ventas_ok, ventas_pend = separar(ventas)
     totales = {
-        "COMPRAS": _hoja_registro(wb, "COMPRAS", compras_ok, paginas),
-        "VENTAS": _hoja_registro(wb, "VENTAS", ventas_ok, paginas),
+        "COMPRAS": _hoja_registro(wb, "COMPRAS", compras_ok, paginas, cuentas_por_id),
+        "VENTAS": _hoja_registro(wb, "VENTAS", ventas_ok, paginas, cuentas_por_id),
     }
 
     ws = wb.create_sheet("Pendientes")
@@ -221,6 +232,7 @@ def generar_resumen(compras: list[dict], ventas: list[dict], cliente: dict, peri
     notas = [
         "Gravadas 5% y 10% van SIN IVA, como en el panel de montos de Contadis; el IVA va aparte.",
         "Las facturas electrónicas se cargan en Contadis aunque no se importen a Marangatu (columna Electrónica).",
+        "Cuenta: la recordada para ese proveedor o la sugerida por la IA (ver Observaciones). Revísela al cargar.",
         f"Consumidor final: razón social \"{NOMBRE_SIN_NOMBRE}\".",
         "Marque la columna Cargado con \"Sí\" a medida que avanza: la fila se pinta de verde.",
         "Al terminar, compare los totales del pie de cada hoja con los de Contadis.",

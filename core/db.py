@@ -16,7 +16,7 @@ CAMPOS_EDITABLES = [
     "periodo", "clase", "tipo_comprobante", "cdc", "tipo_identificacion", "ruc", "dv", "razon_social", "ruc_receptor", "timbrado",
     "vigencia_inicio", "vigencia_fin", "numero", "fecha", "gravada_10", "gravada_5", "exenta", "total",
     "iva_10", "iva_5", "condicion", "moneda", "imputa_iva", "imputa_ire", "imputa_irp", "estado",
-    "errores", "campos_dudosos", "observaciones", "exportado", "concepto",
+    "errores", "campos_dudosos", "observaciones", "exportado", "concepto", "detalle", "cuenta_id", "cuenta_origen",
 ]
 
 _pool: ConnectionPool | None = None

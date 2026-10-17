@@ -16,6 +16,11 @@ IDENT_SIN_RAZON_SOCIAL = {"11", "12", "15"}
 NUMERO_SIN_NOMBRE = "44444401"
 
 
+def gs(valor) -> str:
+    """Guaraníes con punto de miles, como se escriben en Paraguay: 1.100.000"""
+    return f"{int(valor or 0):,}".replace(",", ".")
+
+
 def calcular_dv(numero: str, base_max: int = 11) -> int:
     """Dígito verificador del RUC (algoritmo módulo 11 de la SET)."""
     digitos = "".join(c if c.isdigit() else str(ord(c.upper())) for c in numero)
@@ -144,13 +149,13 @@ def validar_comprobante(c: dict, cliente_ruc: str, periodo: str, es_duplicado: b
     if total <= 0:
         errores.append("El total es cero o no se pudo leer")
     if c.get("tipo_comprobante") == 109 and abs(g10 + g5 + ex - total) > TOLERANCIA_GS:
-        errores.append(f"Gravada 10% + gravada 5% + exenta ({g10 + g5 + ex:,}) no coincide con el total ({total:,})")
+        errores.append(f"Gravada 10% + gravada 5% + exenta ({gs(g10 + g5 + ex)}) no coincide con el total ({gs(total)})")
 
     iva10, iva5 = int(c.get("iva_10") or 0), int(c.get("iva_5") or 0)
     if iva10 and abs(round(g10 / 11) - iva10) > TOLERANCIA_GS:
-        errores.append(f"IVA 10% impreso ({iva10:,}) no coincide con el calculado ({round(g10 / 11):,})")
+        errores.append(f"IVA 10% impreso ({gs(iva10)}) no coincide con el calculado ({gs(round(g10 / 11))})")
     if iva5 and abs(round(g5 / 21) - iva5) > TOLERANCIA_GS:
-        errores.append(f"IVA 5% impreso ({iva5:,}) no coincide con el calculado ({round(g5 / 21):,})")
+        errores.append(f"IVA 5% impreso ({gs(iva5)}) no coincide con el calculado ({gs(round(g5 / 21))})")
 
     if c.get("condicion") not in (1, 2):
         errores.append("No se pudo determinar si es contado o crédito")

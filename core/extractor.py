@@ -47,6 +47,8 @@ ESQUEMA = {
                     },
                     "nombre_receptor": _CAMPO_TEXTO,
                     "concepto": _CAMPO_TEXTO,
+                    "detalle": _CAMPO_TEXTO,
+                    "cuenta_id": _CAMPO_TEXTO,
                     "timbrado": _CAMPO_TEXTO,
                     "vigencia_inicio": _CAMPO_TEXTO,
                     "vigencia_fin": _CAMPO_TEXTO,
@@ -65,7 +67,7 @@ ESQUEMA = {
                 },
                 "required": [
                     "clase", "tipo_documento", "cdc", "ruc_emisor", "dv_emisor", "razon_social_emisor",
-                    "ruc_receptor", "dv_receptor", "tipo_doc_receptor", "nombre_receptor", "concepto", "timbrado", "vigencia_inicio", "vigencia_fin", "numero",
+                    "ruc_receptor", "dv_receptor", "tipo_doc_receptor", "nombre_receptor", "concepto", "detalle", "cuenta_id", "timbrado", "vigencia_inicio", "vigencia_fin", "numero",
                     "fecha_emision", "condicion", "moneda", "gravada_10", "gravada_5", "exenta", "total",
                     "iva_10", "iva_5", "campos_dudosos", "observaciones",
                 ],
@@ -93,6 +95,8 @@ Cómo completar los campos:
 - tipo_doc_receptor: RUC si el documento del receptor tiene dígito verificador (ej. 80012345-6) o dice RUC; CEDULA si es un número de cédula sin DV; PASAPORTE, CEDULA_EXTRANJERA, DIPLOMATICO o ID_TRIBUTARIA si así lo indica; SIN_NOMBRE si no figura comprador, dice "sin nombre", "consumidor final" o "innominado", o es un ticket sin datos del comprador. Para CEDULA, ruc_receptor lleva solo los números (sin puntos) y dv_receptor queda vacío.
 - nombre_receptor: nombre o razón social del receptor tal como figura.
 - concepto: resumen breve (máximo 60 caracteres) de lo comprado o vendido según el detalle, por ejemplo "Útiles de oficina", "Combustible", "Honorarios profesionales", "Mercaderías varias". No inventes: si el detalle no se lee, dejalo vacío.
+- detalle: los ítems de la factura en una línea, separados por " | ", con cantidad y descripción abreviada (máximo 250 caracteres), por ejemplo "2 marcador acrílico | 1 borrador de pizarra". Vacío si no se lee.
+- cuenta_id: el id de la cuenta contable que corresponde según el concepto, elegido de la lista "Cuentas disponibles" del pedido; tené en cuenta la tasa de IVA (por ejemplo, mercaderías al 10% o al 5%). Si ninguna corresponde, "NINGUNA".
 - timbrado: los 8 dígitos. Vigencia y fecha de emisión en formato dd/mm/aaaa.
 - numero: en formato 001-001-0000000 (establecimiento-punto de expedición-número).
 - Montos en guaraníes, enteros, sin puntos ni decimales. gravada_10, gravada_5 y exenta son los subtotales de las columnas de venta, CON IVA incluido. total es el total a pagar. iva_10 e iva_5 son los de la liquidación del IVA. Si un monto no figura, poné 0.
@@ -145,7 +149,24 @@ def normalizar_resultado(datos: dict) -> dict:
     return {"contenido_pagina": contenido, "comprobantes": comprobantes}
 
 
-def _pedido(cliente_ruc: str, cliente_nombre: str, tipo_lote: str, cdcs_detectados: list[str] | None) -> str:
+def esquema_con_cuentas(cuentas: list[dict] | None) -> dict:
+    """El esquema de salida con cuenta_id limitado a los id de las cuentas disponibles."""
+    esquema = copy.deepcopy(ESQUEMA)
+    opciones = [str(c["id"]) for c in (cuentas or [])] + ["NINGUNA"]
+    esquema["properties"]["comprobantes"]["items"]["properties"]["cuenta_id"] = {"type": "string", "enum": opciones}
+    return esquema
+
+
+def _lista_cuentas(cuentas: list[dict] | None) -> str:
+    if not cuentas:
+        return ""
+    lineas = [f"- {c['id']}: {c['nombre']}" + (f" ({c['palabras_clave']})" if c.get("palabras_clave") else "")
+              for c in cuentas]
+    return "\nCuentas disponibles (id: nombre y palabras clave):\n" + "\n".join(lineas)
+
+
+def _pedido(cliente_ruc: str, cliente_nombre: str, tipo_lote: str, cdcs_detectados: list[str] | None,
+            cuentas: list[dict] | None = None) -> str:
     rol = "comprador (receptor)" if tipo_lote == "COMPRAS" else "vendedor (emisor)"
     pedido = (
         f"Lote de {tipo_lote}. Nuestro cliente es {cliente_nombre}, RUC {cliente_ruc}, "
@@ -153,7 +174,7 @@ def _pedido(cliente_ruc: str, cliente_nombre: str, tipo_lote: str, cdcs_detectad
     )
     if cdcs_detectados:
         pedido += f" En la página se leyó por QR el CDC: {', '.join(cdcs_detectados)}."
-    return pedido
+    return pedido + _lista_cuentas(cuentas)
 
 
 # ---------------------------------------------------------------- Claude
@@ -164,14 +185,14 @@ def _cliente_claude():
     return anthropic.Anthropic()
 
 
-def _llamar_claude(imagen: bytes, pedido: str) -> dict:
+def _llamar_claude(imagen: bytes, pedido: str, esquema: dict = ESQUEMA) -> dict:
     parametros = dict(
         model=config.MODELO,
         max_tokens=16000,
         system=INSTRUCCIONES,
         output_config={
             "effort": config.ESFUERZO,
-            "format": {"type": "json_schema", "schema": ESQUEMA},
+            "format": {"type": "json_schema", "schema": esquema},
         },
         messages=[{
             "role": "user",
@@ -225,7 +246,7 @@ def _cliente_gemini():
     return genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
 
-def _llamar_gemini(imagen: bytes, pedido: str) -> dict:
+def _llamar_gemini(imagen: bytes, pedido: str, esquema: dict = ESQUEMA) -> dict:
     from google.genai import types
 
     cliente = _cliente_gemini()  # se guarda en una variable: si no, el cliente se cierra antes de enviar
@@ -235,7 +256,7 @@ def _llamar_gemini(imagen: bytes, pedido: str) -> dict:
         config=types.GenerateContentConfig(
             system_instruction=INSTRUCCIONES,
             response_mime_type="application/json",
-            response_json_schema=_esquema_gemini(ESQUEMA),
+            response_json_schema=_esquema_gemini(esquema),
             max_output_tokens=16000,
         ),
     )
@@ -269,8 +290,8 @@ def _con_reintentos(funcion, *args):
 
 
 def extraer_pagina(imagen: bytes, cliente_ruc: str, cliente_nombre: str, tipo_lote: str,
-                   cdcs_detectados: list[str] | None = None) -> dict:
+                   cdcs_detectados: list[str] | None = None, cuentas: list[dict] | None = None) -> dict:
     """Envía una página (JPG) al proveedor configurado y devuelve el JSON normalizado según ESQUEMA."""
-    pedido = _pedido(cliente_ruc, cliente_nombre, tipo_lote, cdcs_detectados)
+    pedido = _pedido(cliente_ruc, cliente_nombre, tipo_lote, cdcs_detectados, cuentas)
     llamar = _llamar_gemini if config.PROVEEDOR_IA == "gemini" else _llamar_claude
-    return normalizar_resultado(_con_reintentos(llamar, imagen, pedido))
+    return normalizar_resultado(_con_reintentos(llamar, imagen, pedido, esquema_con_cuentas(cuentas)))

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="220" height="48" viewBox="0 0 220 48" role="img" aria-label="Jehupi">
+  <rect x="2" y="4" width="40" height="40" rx="10" fill="#3B82C4"/>
+  <path d="M14 15h16M14 22h16M14 29h10" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="31" cy="31" r="5" fill="none" stroke="#FFFFFF" stroke-width="2.5"/>
+  <text x="52" y="31" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="22" font-weight="700" fill="#E6ECF5">Jehupi</text>
+  <text x="53" y="43" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="9" letter-spacing="1.2" fill="#9FB3CC">ESTUDIO CONTABLE</text>
+</svg>

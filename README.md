@@ -51,6 +51,20 @@ Mientras las facturas se sigan cargando en **Contadis** (que no tiene importaci�
 - Columna **Cargado** (Sí/No): la fila se pinta de verde al marcarla. **Totales** al pie para comparar con Contadis.
 - Hoja **Pendientes** con lo que todavía no está revisado, para no cargar datos sin control.
 
+### Plan de cuentas y cuenta sugerida
+
+En **Configuración → Plan de cuentas** se cargan las cuentas de Contadis (código, nombre y palabras clave), generales para todos los clientes o propias de un cliente. También se pueden **importar desde Excel o CSV** (columnas `registro`, `codigo`, `nombre`, `palabras_clave`).
+
+Para cada factura, la cuenta se asigna así:
+
+1. **La recordada para ese proveedor** (o comprador): al aprobar una factura con cuenta, queda guardada para la próxima.
+2. **La que elige la IA** de la lista de cuentas activas, según el concepto y las palabras clave.
+3. **Ninguna**: se completa en la revisión.
+
+La app trae cuentas iniciales de ejemplo. Los códigos `1.01.04.01.` y `4.01.01.` son los que se ven en Contadis; al resto hay que **completarle el código** de su plan.
+
+Además, cada factura tiene un **concepto** breve, el **detalle de ítems** y, en el Excel, la **descripción al estilo Contadis** ("ÚTILES DE OFICINA S/ Factura Nro. 001-001-0045645 Proveedor: …").
+
 ### Imágenes temporales
 
 Para no llenar el 1 GB gratuito, las imágenes **se borran solas** cuando ya no hacen falta:
@@ -129,7 +143,9 @@ TEST_DATABASE_URL=postgresql://postgres:pruebas@localhost:5433/postgres pytest -
 ## Estructura
 
 ```
-app.py                  interfaz web
+app.py                  estructura de la app: tema, ingreso, menú
+ui/                     pantallas (panel, carga, revisión, exportar, clientes, plan de cuentas, usuarios)
+static/                 logo e ícono
 core/
   config.py             configuración (secretos de Streamlit o .env)
   db.py                 base de datos (Supabase / PostgreSQL)
@@ -140,6 +156,9 @@ core/
   validaciones.py       RUC, timbrado, montos, IVA
   procesador.py         flujo completo de un lote
   exportar.py           ZIP para Marangatu y Excel de control
+  contadis.py           Excel para cargar en Contadis
+  cuentas.py            plan de cuentas y cuenta recordada por proveedor
+  indicadores.py        números del panel (estado del mes, IVA)
 supabase/esquema.sql    tablas y carpeta de imágenes
 tests/                  pruebas automáticas
 ```

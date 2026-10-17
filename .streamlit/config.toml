@@ -5,6 +5,27 @@ toolbarMode = "minimal"
 [server]
 # PDF grandes con muchas facturas (MB).
 maxUploadSize = 200
+enableStaticServing = true
 
 [browser]
 gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#1E4E8C"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F3F6FA"
+textColor = "#1F2937"
+borderColor = "#E2E8F0"
+linkColor = "#1E4E8C"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap, sans-serif"
+headingFontWeights = [700, 650, 600, 600, 600, 600]
+baseRadius = "0.6rem"
+showWidgetBorder = true
+dataframeHeaderBackgroundColor = "#F3F6FA"
+
+[theme.sidebar]
+backgroundColor = "#0F2742"
+secondaryBackgroundColor = "#17365A"
+textColor = "#E6ECF5"
+borderColor = "#24456E"

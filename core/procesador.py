@@ -3,7 +3,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
 
 from . import cdc as cdc_mod
-from . import archivos, config, db
+from . import archivos, config, cuentas, db
 from .extractor import extraer_pagina
 from .ingesta import paginas_desde_archivo
 from .qr import leer_qr
@@ -16,7 +16,8 @@ TIPO_IDENTIFICACION = {"RUC": "11", "CEDULA": "12", "PASAPORTE": "13", "CEDULA_E
 CONDICION = {"CONTADO": 1, "CREDITO": 2}
 
 
-def analizar_pagina(pagina: dict, cliente: dict, tipo_lote: str, extractor: Callable = extraer_pagina) -> dict:
+def analizar_pagina(pagina: dict, cliente: dict, tipo_lote: str, extractor: Callable = extraer_pagina,
+                    cuentas_disponibles: list[dict] | None = None) -> dict:
     """Devuelve {"comprobantes": [...], "contenido_pagina": ..., "cdcs": [...], "fuente": ...}."""
     # 1) El CDC de las electrónicas se toma sin IA: del texto (KuDE en PDF digital) o del QR.
     cdcs = cdc_mod.buscar_en_texto(pagina.get("texto", "")) or \
@@ -25,7 +26,8 @@ def analizar_pagina(pagina: dict, cliente: dict, tipo_lote: str, extractor: Call
     # 2) La IA lee la página siempre: también los montos de las electrónicas, que no se
     #    importan a Marangatu pero sí se cargan en el sistema contable (Contadis).
     try:
-        resultado = extractor(pagina["jpg"], cliente["ruc"], cliente["nombre"], tipo_lote, cdcs)
+        resultado = extractor(pagina["jpg"], cliente["ruc"], cliente["nombre"], tipo_lote, cdcs,
+                              cuentas=cuentas_disponibles)
     except Exception as e:  # noqa: BLE001 - se registra el error y la página queda para revisión
         if cdcs:  # al menos se registran las electrónicas por su CDC (sin montos)
             return {"contenido_pagina": "COMPROBANTES", "comprobantes": [], "cdcs": cdcs, "fuente": "cdc",
@@ -120,6 +122,7 @@ def _registro_desde_ia(item: dict, base: dict, cliente: dict) -> dict:
         "condicion": CONDICION.get(item["condicion"]),
         "moneda": (item["moneda"] or "PYG").upper(),
         "concepto": (item.get("concepto") or "")[:120],
+        "detalle": (item.get("detalle") or "")[:500],
         "campos_dudosos": item["campos_dudosos"],
         "observaciones": item["observaciones"],
     }
@@ -139,6 +142,7 @@ def procesar_lote(lote_id: int, archivos_subidos: list[tuple[str, bytes]], extra
                   progreso: Callable[[int, int, str], None] | None = None) -> dict:
     lote = db.fila("SELECT * FROM lotes WHERE id=%s", (lote_id,))
     cliente = db.fila("SELECT * FROM clientes WHERE id=%s", (lote["cliente_id"],))
+    disponibles = cuentas.listar(lote["tipo"], cliente["id"])
 
     # 1) Páginas -> imagen JPG, que se guarda (temporalmente) en el almacenamiento.
     paginas = []
@@ -157,7 +161,8 @@ def procesar_lote(lote_id: int, archivos_subidos: list[tuple[str, bytes]], extra
     total = len(paginas)
     resultados: dict[int, dict] = {}
     with ThreadPoolExecutor(max_workers=max(1, config.HILOS)) as pool:
-        futuros = {pool.submit(analizar_pagina, p, cliente, lote["tipo"], extractor): p for p in paginas}
+        futuros = {pool.submit(analizar_pagina, p, cliente, lote["tipo"], extractor, disponibles): p
+                   for p in paginas}
         for i, futuro in enumerate(as_completed(futuros), start=1):
             p = futuros[futuro]
             resultados[p["nro"]] = futuro.result()
@@ -203,15 +208,17 @@ def procesar_lote(lote_id: int, archivos_subidos: list[tuple[str, bytes]], extra
                 if cdc in cdcs_pendientes:
                     cdcs_pendientes.remove(cdc)
                 if cdc_mod.dv_valido(cdc):
-                    registros.append(_registro_electronico(cdc, base, item, cliente))
+                    registros.append(cuentas.asignar(_registro_electronico(cdc, base, item, cliente),
+                                                     item.get("cuenta_id"), disponibles))
                 else:
                     reg = _registro_desde_ia(item, base, cliente)
                     reg.update(estado="REVISAR", errores=["Parece electrónica pero el CDC no es válido: verificar"])
-                    registros.append(reg)
+                    registros.append(cuentas.asignar(reg, item.get("cuenta_id"), disponibles))
             else:
-                registros.append(evaluar(_registro_desde_ia(item, base, cliente), cliente))
+                reg = cuentas.asignar(_registro_desde_ia(item, base, cliente), item.get("cuenta_id"), disponibles)
+                registros.append(evaluar(reg, cliente))
         # CDC leídos por QR o texto que la IA no listó.
-        registros += [_registro_electronico(c, base) for c in cdcs_pendientes]
+        registros += [cuentas.asignar(_registro_electronico(c, base), None, disponibles) for c in cdcs_pendientes]
 
         for reg in registros:
             ultimo_id = db.insertar_comprobante(reg)

@@ -15,7 +15,7 @@ from core import archivos, config, db
 
 ESQUEMA = Path(__file__).resolve().parent.parent / "supabase" / "esquema.sql"
 URL = os.getenv("TEST_DATABASE_URL", "")
-TABLAS = "historial, exportaciones, comprobantes, paginas, lotes, clientes, usuarios"
+TABLAS = "historial, exportaciones, cuentas_contraparte, comprobantes, paginas, lotes, cuentas, clientes, usuarios"
 
 
 @pytest.fixture(scope="session")
@@ -41,6 +41,7 @@ def base(_esquema, tmp_path, monkeypatch):
     monkeypatch.setattr(config, "HILOS", 1)
     with psycopg.connect(URL, autocommit=True) as con:
         con.execute(f"TRUNCATE {TABLAS} RESTART IDENTITY CASCADE")
+        con.execute(ESQUEMA.read_text())  # vuelve a cargar las cuentas iniciales
     db.cerrar()
     archivos._almacen = None
     yield tmp_path / "archivos"

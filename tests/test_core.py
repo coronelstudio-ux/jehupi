@@ -113,7 +113,7 @@ def test_proceso_y_exportacion(base):
     cliente_id, lote_id = _cliente_y_lote()
     llamadas = []
 
-    def extractor_falso(imagen, ruc, nombre, tipo, cdcs):
+    def extractor_falso(imagen, ruc, nombre, tipo, cdcs, **k):
         assert imagen[:2] == b"\xff\xd8"  # la IA recibe la página como JPG
         llamadas.append(cdcs)
         n = len(llamadas)
@@ -168,7 +168,7 @@ def test_factura_de_otro_mes_va_a_su_periodo(base):
     cliente_id, lote_id = _cliente_y_lote()
     items = [_item(), _item(numero="001-001-0046021", fecha_emision="07/05/2026", gravada_10=85000, total=85000, iva_10=7727)]
     resumen = procesador.procesar_lote(lote_id, [("lote.pdf", _pdf(["x"]))],
-                                       extractor=lambda *a: {"contenido_pagina": "COMPROBANTES", "comprobantes": items})
+                                       extractor=lambda *a, **k: {"contenido_pagina": "COMPROBANTES", "comprobantes": items})
     assert resumen["OK"] == 2 and resumen["periodos"] == {"04/2026": 1, "05/2026": 1}
     mayo = db.fila("SELECT * FROM comprobantes WHERE numero='001-001-0046021'")
     assert mayo["periodo"] == "05/2026" and mayo["estado"] == "OK"
@@ -315,7 +315,7 @@ def test_imagenes_se_borran_al_cerrar_comprobantes(base):
         {"contenido_pagina": "NO_ES_COMPROBANTE", "comprobantes": []},                                   # p4: hoja en blanco
     ]
     procesador.procesar_lote(lote_id, [("lote.pdf", _pdf(["1", "2", "3", "4"]))],
-                             extractor=lambda *a: respuestas.pop(0))
+                             extractor=lambda *a, **k: respuestas.pop(0))
     pag = {p["nro"]: p for p in db.filas("SELECT * FROM paginas ORDER BY nro")}
     rutas = {n: f"lote_{lote_id:06d}/pag_{n:04d}.jpg" for n in pag}
 
@@ -339,7 +339,7 @@ def test_imagenes_se_borran_al_cerrar_comprobantes(base):
 
 def test_pagina_con_dos_facturas_espera_a_ambas(base):
     cliente_id, lote_id = _cliente_y_lote()
-    procesador.procesar_lote(lote_id, [("hoja.pdf", _pdf(["1"]))], extractor=lambda *a: {
+    procesador.procesar_lote(lote_id, [("hoja.pdf", _pdf(["1"]))], extractor=lambda *a, **k: {
         "contenido_pagina": "COMPROBANTES",
         "comprobantes": [_item(numero="001-001-0000001", total=1), _item(numero="001-001-0000002", total=1)]})
     pagina = db.fila("SELECT * FROM paginas")
@@ -435,7 +435,7 @@ def test_lote_de_ventas_completo(base):
             _item(numero="001-001-0000099", tipo_doc_receptor="RUC", nombre_receptor="X")]},
     ]
     resumen = procesador.procesar_lote(lote_id, [("ventas.pdf", _pdf(["1", "2", "3"]))],
-                                       extractor=lambda *a: respuestas.pop(0))
+                                       extractor=lambda *a, **k: respuestas.pop(0))
     assert resumen["OK"] == 3 and resumen["REVISAR"] == 1
     malo = db.fila("SELECT * FROM comprobantes WHERE estado='REVISAR'")
     assert any("emitida por el RUC" in e for e in malo["errores"])
@@ -488,8 +488,15 @@ def test_fila_contadis_compras_y_ventas():
         "Est.": "001", "Pto.": "001", "Número": "0045645", "Comprobante": "FACTURA", "Razón social": "Maxi Copias",
         "Fecha": None, "Condición": "Contado", "Timbrado": "18586180", "RUC": "1895550-9",
         "Gravadas 5%": 0, "Gravadas 10%": 46364, "I.V.A. 5%": 0, "I.V.A. 10%": 4636, "Exenta": 0, "Total": 51000,
-        "Concepto": "Útiles de librería", "Electrónica": "", "Cargado": "", "Observaciones": ""}
-    assert avisos == []
+        "Concepto": "Útiles de librería", "Detalle": "", "Electrónica": "", "Cargado": "",
+        "Observaciones": "Sin cuenta", "Cuenta": "", "Descripción": ""}
+    assert avisos == ["Sin cuenta"]
+    cuenta = {"id": 7, "codigo": "5.01.", "nombre": "Útiles de Oficina"}
+    con_cuenta = dict(zip(contadis.COLUMNAS["COMPRAS"], contadis.fila(
+        _para_contadis(cuenta_id=7, cuenta_origen="IA"), "COMPRAS", cuentas_por_id={7: cuenta})[0]))
+    assert con_cuenta["Cuenta"] == "5.01. Útiles de Oficina"
+    assert con_cuenta["Descripción"] == "ÚTILES DE OFICINA S/ Factura Nro. 001-001-0045645 Proveedor: Maxi Copias"
+    assert con_cuenta["Observaciones"] == "Cuenta sugerida por la IA"
     sin_nombre = dict(zip(contadis.COLUMNAS["VENTAS"], contadis.fila(
         _para_contadis(tipo_identificacion="15", ruc=NUMERO_SIN_NOMBRE, dv="", razon_social=""), "VENTAS")[0]))
     assert sin_nombre["Razón social"] == "CLIENTE OCASIONAL" and sin_nombre["RUC / CI"] == NUMERO_SIN_NOMBRE
@@ -511,12 +518,15 @@ def test_resumen_contadis_excel():
     wb = load_workbook(io.BytesIO(datos))
     assert wb.sheetnames == ["Resumen", "Compras", "Ventas", "Pendientes"]
     ws = wb["Compras"]
-    assert [ws.cell(r, 3).value for r in (2, 3)] == ["0000001", "0000002"]   # ordenadas por fecha
-    assert ws.cell(2, 17).value == "Sí"                                       # electrónica incluida
-    assert ws.cell(5, 1).value == "TOTALES" and ws.cell(5, 15).value == "=SUM(O2:O3)"
+    col = {ws.cell(1, i).value: i for i in range(1, ws.max_column + 1)}
+    assert [ws.cell(r, col["Número"]).value for r in (2, 3)] == ["0000001", "0000002"]   # ordenadas por fecha
+    assert ws.cell(2, col["Electrónica"]).value == "Sí"                                    # electrónica incluida
+    letra = ws.cell(1, col["Total"]).column_letter
+    assert ws.cell(5, 1).value == "TOTALES" and ws.cell(5, col["Total"]).value == f"=SUM({letra}2:{letra}3)"
     pendientes = [(r[0].value, r[2].value) for r in wb["Pendientes"].iter_rows(min_row=2)]
     assert pendientes == [("COMPRAS", "001-001-0000003"), ("COMPRAS", "001-001-0000005")]
     assert wb["Ventas"].cell(2, 5).value == "CLIENTE OCASIONAL"
+    assert ws.cell(2, col["Observaciones"]).value.startswith("Sin cuenta")
     resumen = [[c.value for c in fila] for fila in wb["Resumen"].iter_rows(min_row=6, max_row=7)]
     assert resumen[0][:3] == ["Compras", 2, 2] and resumen[0][-1] == 102000
     assert resumen[1][:3] == ["Ventas", 1, 0]
@@ -531,7 +541,7 @@ def test_electronica_guarda_montos_para_contadis(base):
                   numero="001-002-0000123", gravada_10=110000, total=110000, iva_10=10000, concepto="Combustible")]},
     ]
 
-    def extractor(imagen, ruc, nombre, tipo, cdcs):
+    def extractor(imagen, ruc, nombre, tipo, cdcs, **k):
         assert cdcs == [CDC]  # la IA recibe el CDC leído del texto
         return respuestas.pop(0)
 
@@ -549,7 +559,7 @@ def test_electronica_sin_montos_si_falla_la_ia(base):
     cliente_id, lote_id = _cliente_y_lote()
     kude = "KuDE CDC " + " ".join(CDC[i:i + 4] for i in range(0, 44, 4))
 
-    def falla(*a):
+    def falla(*a, **k):
         raise RuntimeError("sin conexión")
 
     procesador.procesar_lote(lote_id, [("kude.pdf", _pdf([kude]))], extractor=falla)
@@ -558,3 +568,79 @@ def test_electronica_sin_montos_si_falla_la_ia(base):
     assert "Sin montos" in c["observaciones"]
     cargar, pendientes = contadis.separar([c])
     assert not cargar and len(pendientes) == 1
+
+
+
+# ---------- plan de cuentas y memoria por proveedor ----------
+
+from core import cuentas, indicadores  # noqa: E402
+
+
+def test_esquema_con_cuentas():
+    esquema = extractor.esquema_con_cuentas([{"id": 3, "nombre": "A"}, {"id": 9, "nombre": "B"}])
+    regla = esquema["properties"]["comprobantes"]["items"]["properties"]["cuenta_id"]
+    assert regla["enum"] == ["3", "9", "NINGUNA"]
+    assert "cuenta_id" not in extractor.ESQUEMA["properties"]["comprobantes"]["items"]["properties"] or \
+        "enum" not in extractor.ESQUEMA["properties"]["comprobantes"]["items"]["properties"]["cuenta_id"]
+    pedido = extractor._pedido("1", "C", "COMPRAS", [], [{"id": 3, "nombre": "Combustibles", "palabras_clave": "nafta"}])
+    assert "- 3: Combustibles (nafta)" in pedido
+
+
+def test_cuentas_iniciales_y_edicion(base):
+    compras = cuentas.listar("COMPRAS")
+    assert any(c["codigo"] == "1.01.04.01." for c in compras) and len(compras) >= 10
+    assert any(c["codigo"] == "4.01.01." for c in cuentas.listar("VENTAS"))
+    cliente_id, _ = _cliente_y_lote()
+    propia = cuentas.guardar("COMPRAS", "Insumos de Ferretería", "5.02.", "ferretería", cliente_id)
+    assert propia in [c["id"] for c in cuentas.listar("COMPRAS", cliente_id)]
+    assert propia not in [c["id"] for c in cuentas.listar("COMPRAS")]          # no es general
+    assert cuentas.guardar("COMPRAS", "insumos de ferretería", "5.03.", "", cliente_id) == propia  # mismo nombre
+    assert cuentas.por_id(propia)["codigo"] == "5.03."
+    cuentas.guardar("COMPRAS", "Insumos de Ferretería", "5.03.", "", cliente_id, propia, activo=False)
+    assert propia not in [c["id"] for c in cuentas.listar("COMPRAS", cliente_id)]
+    n = cuentas.importar([{"Registro": "ventas", "Codigo": "4.02.", "Nombre": "Alquileres Cobrados"},
+                          {"registro": "otro", "nombre": "x"}, {"registro": "COMPRAS", "nombre": ""}])
+    assert n == 1 and any(c["nombre"] == "Alquileres Cobrados" for c in cuentas.listar("VENTAS"))
+
+
+def test_cuenta_ia_y_memoria_por_proveedor(base):
+    cliente_id, lote_id = _cliente_y_lote()
+    combustible = next(c for c in cuentas.listar("COMPRAS") if c["nombre"].startswith("Combustibles"))
+    utiles = next(c for c in cuentas.listar("COMPRAS") if c["nombre"].startswith("Útiles"))
+    recibidas = []
+
+    def extractor(imagen, ruc, nombre, tipo, cdcs, cuentas=None):
+        recibidas.append(cuentas)
+        return {"contenido_pagina": "COMPROBANTES", "comprobantes": [
+            _item(cuenta_id=str(utiles["id"]), concepto="Útiles de librería", detalle="2 marcador | 1 borrador")]}
+
+    procesador.procesar_lote(lote_id, [("a.pdf", _pdf(["1"]))], extractor=extractor)
+    c = db.fila("SELECT * FROM comprobantes")
+    assert recibidas[0] and any(x["id"] == utiles["id"] for x in recibidas[0])   # la IA recibe el plan
+    assert (c["cuenta_id"], c["cuenta_origen"], c["detalle"]) == (utiles["id"], "IA", "2 marcador | 1 borrador")
+
+    # Se corrige y aprueba con otra cuenta: queda recordada para el proveedor.
+    cuentas.recordar(cliente_id, "COMPRAS", c["ruc"], combustible["id"])
+    _, lote2 = None, db.ejecutar("INSERT INTO lotes (cliente_id, tipo, periodo, creado_por) "
+                                 "VALUES (%s, 'COMPRAS', '04/2026', 'test') RETURNING id", (cliente_id,))
+    procesador.procesar_lote(lote2, [("b.pdf", _pdf(["1"]))], extractor=lambda *a, **k: {
+        "contenido_pagina": "COMPROBANTES",
+        "comprobantes": [_item(numero="001-001-0000999", cuenta_id=str(utiles["id"]))]})
+    c2 = db.fila("SELECT * FROM comprobantes WHERE numero='001-001-0000999'")
+    assert (c2["cuenta_id"], c2["cuenta_origen"]) == (combustible["id"], "PROVEEDOR")
+
+    # Cuenta inexistente o "NINGUNA": queda sin cuenta. El consumidor final no se recuerda.
+    assert cuentas.asignar({"cliente_id": cliente_id, "tipo_lote": "VENTAS", "ruc": "1"}, "NINGUNA", [])["cuenta_id"] is None
+    cuentas.recordar(cliente_id, "VENTAS", NUMERO_SIN_NOMBRE, utiles["id"])
+    assert cuentas.recordada(cliente_id, "VENTAS", NUMERO_SIN_NOMBRE) is None
+
+
+def test_indicadores_del_mes():
+    datos = [_para_contadis(tipo_lote="COMPRAS"),
+             _para_contadis(tipo_lote="COMPRAS", estado="REVISAR"),
+             _para_contadis(tipo_lote="COMPRAS", estado="DESCARTADA"),
+             _para_contadis(tipo_lote="VENTAS", gravada_10=1100000, iva_10=100000, total=1100000, cuenta_id=1)]
+    r = indicadores.resumen_mes(datos)
+    assert (r["COMPRAS"]["total"], r["COMPRAS"]["revisar"], r["COMPRAS"]["listos"]) == (2, 1, 1)
+    assert (r["COMPRAS"]["iva"], r["VENTAS"]["iva"], r["saldo_iva"]) == (4636, 100000, 95364)
+    assert (r["COMPRAS"]["sin_cuenta"], r["VENTAS"]["sin_cuenta"]) == (1, 0)

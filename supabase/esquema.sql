@@ -114,3 +114,65 @@ alter table exportaciones enable row level security;
 insert into storage.buckets (id, name, public)
 values ('facturas', 'facturas', false)
 on conflict (id) do nothing;
+
+-- ---------------------------------------------------------------------------
+-- Plan de cuentas (para sugerir la cuenta de Contadis) y memoria por proveedor.
+-- cliente_id NULL = cuenta general, disponible para todos los clientes.
+create table if not exists cuentas (
+    id bigint generated always as identity primary key,
+    registro text not null check (registro in ('COMPRAS', 'VENTAS')),
+    codigo text not null default '',
+    nombre text not null,
+    palabras_clave text not null default '',
+    cliente_id bigint references clientes(id),
+    activo boolean not null default true
+);
+create unique index if not exists ux_cuentas_nombre
+    on cuentas (registro, lower(nombre), coalesce(cliente_id, 0));
+
+-- La cuenta que se usó por última vez para cada proveedor (o comprador) de cada cliente.
+create table if not exists cuentas_contraparte (
+    cliente_id bigint not null references clientes(id),
+    tipo_lote text not null,
+    ruc text not null,
+    cuenta_id bigint not null references cuentas(id),
+    actualizado_en timestamptz not null default now(),
+    primary key (cliente_id, tipo_lote, ruc)
+);
+
+alter table comprobantes add column if not exists cuenta_id bigint references cuentas(id);
+alter table comprobantes add column if not exists cuenta_origen text not null default '';
+alter table comprobantes add column if not exists detalle text not null default '';
+
+alter table cuentas enable row level security;
+alter table cuentas_contraparte enable row level security;
+
+-- Cuentas iniciales de ejemplo (se pueden editar, desactivar o completar con su código en la app).
+-- Los códigos 1.01.04.01. y 4.01.01. son los que se ven en Contadis; el resto queda para completar.
+insert into cuentas (registro, codigo, nombre, palabras_clave)
+select v.registro, v.codigo, v.nombre, v.palabras_clave
+from (values
+    ('COMPRAS', '1.01.04.01.', 'Mercaderías Gravadas Por El IVA Al 10%', 'mercaderías para reventa, stock, productos'),
+    ('COMPRAS', '', 'Mercaderías Gravadas Por El IVA Al 5%', 'mercaderías al 5%, canasta básica, productos agrícolas'),
+    ('COMPRAS', '', 'Mercaderías Exentas', 'mercaderías exentas'),
+    ('COMPRAS', '', 'Combustibles y Lubricantes', 'combustible, nafta, gasoil, diésel, lubricante, estación de servicio'),
+    ('COMPRAS', '', 'Útiles de Oficina y Papelería', 'librería, papel, bolígrafo, tinta, tóner, fotocopias'),
+    ('COMPRAS', '', 'Energía Eléctrica', 'ANDE, luz, energía'),
+    ('COMPRAS', '', 'Agua', 'ESSAP, agua corriente, aguatero'),
+    ('COMPRAS', '', 'Teléfono e Internet', 'Tigo, Personal, Claro, COPACO, internet, telefonía'),
+    ('COMPRAS', '', 'Alquileres', 'alquiler, arrendamiento, local'),
+    ('COMPRAS', '', 'Honorarios Profesionales', 'honorarios, abogado, contador, escribano, consultoría'),
+    ('COMPRAS', '', 'Mantenimiento y Reparaciones', 'repuestos, reparación, mantenimiento, taller, ferretería'),
+    ('COMPRAS', '', 'Fletes y Transporte', 'flete, transporte, encomienda, envío'),
+    ('COMPRAS', '', 'Gastos de Representación', 'restaurante, comidas, atenciones'),
+    ('COMPRAS', '', 'Seguros', 'seguro, póliza'),
+    ('COMPRAS', '', 'Muebles, Equipos e Informática (Activo Fijo)', 'notebook, computadora, impresora, mueble, equipo'),
+    ('VENTAS', '4.01.01.', 'Ventas De Mercaderías Gravadas Por El IVA', 'venta de mercaderías al 10%'),
+    ('VENTAS', '', 'Ventas De Mercaderías Gravadas Al 5%', 'venta de mercaderías al 5%'),
+    ('VENTAS', '', 'Ventas Exentas', 'ventas exentas'),
+    ('VENTAS', '', 'Prestación de Servicios', 'servicios, honorarios cobrados, mano de obra')
+) as v(registro, codigo, nombre, palabras_clave)
+where not exists (
+    select 1 from cuentas c
+    where c.registro = v.registro and lower(c.nombre) = lower(v.nombre) and c.cliente_id is null
+);
