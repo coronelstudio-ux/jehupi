@@ -170,7 +170,8 @@ def procesar_lote(lote_id: int, archivos_subidos: list[tuple[str, bytes]], extra
                 progreso(i, total, f"Leídas {i} de {total} páginas")
 
     # 3) Validación y guardado, en orden de página (para duplicados y continuaciones).
-    resumen = {"paginas": total, "OK": 0, "REVISAR": 0, "EXCLUIDA": 0, "errores_pagina": 0, "periodos": {}}
+    resumen = {"paginas": total, "OK": 0, "REVISAR": 0, "EXCLUIDA": 0, "errores_pagina": 0, "periodos": {},
+               "detalle": []}
     ultimo_id = None
     for p in paginas:
         p.pop("jpg", None)
@@ -187,6 +188,8 @@ def procesar_lote(lote_id: int, archivos_subidos: list[tuple[str, bytes]], extra
             ultimo_id = db.insertar_comprobante(
                 {**base, "estado": "REVISAR", "errores": [f"No se pudo procesar la página: {r['error']}"]})
             resumen["REVISAR"] += 1
+            resumen["detalle"].append({"archivo": p["archivo"], "pagina": p["nro"],
+                                       "resultado": "Error al leer: queda para revisar"})
             continue
         if r.get("contenido_pagina") == "CONTINUACION" and ultimo_id:
             # La imagen de esta página se conserva mientras el comprobante anterior siga abierto.
@@ -196,6 +199,8 @@ def procesar_lote(lote_id: int, archivos_subidos: list[tuple[str, bytes]], extra
                 "estado": "REVISAR",
                 "errores": anterior["errores"] + [f"Continúa en la página {p['nro']}: verificar totales"],
             }, "sistema", "continuacion")
+            resumen["detalle"].append({"archivo": p["archivo"], "pagina": p["nro"],
+                                       "resultado": "Continúa la factura anterior"})
             continue
 
         cdcs_pendientes = list(r.get("cdcs", []))
@@ -224,6 +229,13 @@ def procesar_lote(lote_id: int, archivos_subidos: list[tuple[str, bytes]], extra
             ultimo_id = db.insertar_comprobante(reg)
             resumen[reg["estado"]] += 1
             resumen["periodos"][reg["periodo"]] = resumen["periodos"].get(reg["periodo"], 0) + 1
+        if registros:
+            resumen["detalle"].append({"archivo": p["archivo"], "pagina": p["nro"],
+                                       "resultado": f"{len(registros)} comprobante(s) cargado(s)"})
+        else:
+            # Antes esta página desaparecía sin aviso: ahora se informa para revisarla a mano.
+            resumen["detalle"].append({"archivo": p["archivo"], "pagina": p["nro"],
+                                       "resultado": "Sin comprobante: la IA no la reconoció como factura"})
 
     db.ejecutar("UPDATE lotes SET estado='PROCESADO' WHERE id=%s", (lote_id,))
     # Hojas en blanco u otros documentos: su imagen ya no hace falta.

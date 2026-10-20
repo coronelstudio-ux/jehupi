@@ -1,4 +1,5 @@
 """Carga de facturas: PDF, fotos o escaneos."""
+import pandas as pd
 import streamlit as st
 
 from core import config, db, procesador
@@ -54,3 +55,11 @@ def pagina() -> None:
                 icon=":material/calendar_month:")
     if resumen["REVISAR"]:
         st.warning("Hay comprobantes para revisar: abrí **Revisión** en el menú.", icon=":material/rule:")
+    sin_comprobante = [d for d in resumen["detalle"] if d["resultado"].startswith("Sin comprobante")]
+    if sin_comprobante:
+        st.warning(f"{len(sin_comprobante)} página(s) no se cargaron como factura. Revisalas en la tabla "
+                   "de abajo: si son facturas, cargalas a mano en Contadis.", icon=":material/warning:")
+    if resumen["detalle"]:
+        seccion("Detalle por página")
+        st.dataframe(pd.DataFrame(resumen["detalle"]), hide_index=True, width="stretch",
+                     column_config={"archivo": "Archivo", "pagina": "Página", "resultado": "Resultado"})
