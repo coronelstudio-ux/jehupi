@@ -165,7 +165,10 @@ def procesar_lote(lote_id: int, archivos_subidos: list[tuple[str, bytes]], extra
                    for p in paginas}
         for i, futuro in enumerate(as_completed(futuros), start=1):
             p = futuros[futuro]
-            resultados[p["nro"]] = futuro.result()
+            try:
+                resultados[p["nro"]] = futuro.result()
+            except Exception as e:  # noqa: BLE001 - una página con error no detiene a las demás
+                resultados[p["nro"]] = {"error": str(e), "comprobantes": [], "cdcs": []}
             if progreso:
                 progreso(i, total, f"Leídas {i} de {total} páginas")
 
@@ -173,7 +176,9 @@ def procesar_lote(lote_id: int, archivos_subidos: list[tuple[str, bytes]], extra
     resumen = {"paginas": total, "OK": 0, "REVISAR": 0, "EXCLUIDA": 0, "errores_pagina": 0, "periodos": {},
                "detalle": []}
     ultimo_id = None
-    for p in paginas:
+
+    def guardar_pagina(p: dict) -> None:
+        nonlocal ultimo_id
         p.pop("jpg", None)
         r = resultados[p["nro"]]
         db.ejecutar("UPDATE paginas SET resultado=%s, error=%s WHERE id=%s", (r, r.get("error"), p["id"]))
@@ -190,7 +195,7 @@ def procesar_lote(lote_id: int, archivos_subidos: list[tuple[str, bytes]], extra
             resumen["REVISAR"] += 1
             resumen["detalle"].append({"archivo": p["archivo"], "pagina": p["nro"],
                                        "resultado": "Error al leer: queda para revisar"})
-            continue
+            return
         if r.get("contenido_pagina") == "CONTINUACION" and ultimo_id:
             # La imagen de esta página se conserva mientras el comprobante anterior siga abierto.
             db.ejecutar("UPDATE paginas SET comprobante_ref=%s WHERE id=%s", (ultimo_id, p["id"]))
@@ -201,7 +206,7 @@ def procesar_lote(lote_id: int, archivos_subidos: list[tuple[str, bytes]], extra
             }, "sistema", "continuacion")
             resumen["detalle"].append({"archivo": p["archivo"], "pagina": p["nro"],
                                        "resultado": "Continúa la factura anterior"})
-            continue
+            return
 
         cdcs_pendientes = list(r.get("cdcs", []))
         registros = []
@@ -236,6 +241,24 @@ def procesar_lote(lote_id: int, archivos_subidos: list[tuple[str, bytes]], extra
             # Antes esta página desaparecía sin aviso: ahora se informa para revisarla a mano.
             resumen["detalle"].append({"archivo": p["archivo"], "pagina": p["nro"],
                                        "resultado": "Sin comprobante: la IA no la reconoció como factura"})
+
+    for p in paginas:
+        try:
+            guardar_pagina(p)
+        except Exception as e:  # noqa: BLE001 - se informa y se sigue con la página siguiente
+            resumen["errores_pagina"] += 1
+            resumen["detalle"].append({"archivo": p["archivo"], "pagina": p["nro"],
+                                       "resultado": f"Error al guardar: {e}"})
+            try:
+                db.insertar_comprobante({
+                    "lote_id": lote_id, "cliente_id": cliente["id"], "pagina_id": p["id"],
+                    "tipo_lote": lote["tipo"], "periodo": lote["periodo"], "estado": "REVISAR",
+                    "errores": [f"No se pudo guardar la página: {e}"],
+                    "imputa_iva": cliente["imputa_iva"], "imputa_ire": cliente["imputa_ire"],
+                    "imputa_irp": cliente["imputa_irp"]})
+                resumen["REVISAR"] += 1
+            except Exception:  # noqa: BLE001 - si la base también falla, queda en el detalle
+                pass
 
     db.ejecutar("UPDATE lotes SET estado='PROCESADO' WHERE id=%s", (lote_id,))
     # Hojas en blanco u otros documentos: su imagen ya no hace falta.
